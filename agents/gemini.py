@@ -89,7 +89,7 @@ class AsyncGeminiAgent(AsyncBaseAgent):
             message_batch = [self.preprocess_input(prompt, history=history) for prompt, history in zip(prompts, histories)]
         else:
             message_batch = [self.preprocess_input(prompt) for prompt in prompts]
-        outputs = asyncio.run(self.batch_generate(message_batch, system_prompts, temperature=None, max_tokens=None))
+        outputs = asyncio.run(self.batch_generate(message_batch, system_prompts, temperature=temperature, max_tokens=max_tokens))
         responses = [self.postprocess_output(output) for output in outputs]
         return responses
 

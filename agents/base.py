@@ -84,7 +84,7 @@ class AsyncBaseAgent(BaseAgent):
             message_batch = [self.preprocess_input(prompt, system_prompt, history) for prompt, system_prompt, history in zip(prompts, system_prompts, histories)]
         else:
             message_batch = [self.preprocess_input(prompt, system_prompt) for prompt, system_prompt in zip(prompts, system_prompts)]
-        outputs = asyncio.run(self.batch_generate(message_batch, temperature=None, max_tokens=None))
+        outputs = asyncio.run(self.batch_generate(message_batch, temperature=temperature, max_tokens=max_tokens))
         responses = [self.postprocess_output(output) for output in outputs]
 
         return responses
