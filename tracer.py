@@ -659,6 +659,12 @@ class BaseTracer(ABC):
         return self.base_model.batch_cot(texts, temperature=temperature, max_tokens=max_tokens)
 
 class Tracer(BaseTracer):
+    # Tracer's weighted average is a model-written paragraph; TracerLight's is a
+    # concatenated "**Prediction n**" block that reads better opened on its own
+    # line. Held as an attribute so both share one chain implementation without
+    # either one's emitted trace text changing.
+    _thoughts_block_prefix = ""
+
     def __init__(self, args):
         super().__init__(args)
         self.trace_base_header = "To answer this question, let's analyze the context step by step regarding [target agent]'s perceptions and thoughts."
@@ -1634,9 +1640,22 @@ class Tracer(BaseTracer):
                 context_str += f"{h['context']['action']}\n"
                 if h['perception']['action']:
                     context_str += f"<note>{h['perception']['action']}</note>"
-            trace_str += f"<context {str(idx + 1)}>\n{context_str.strip()}\n\n<{target_agent}'s updated thoughts>{h['hypothesis']}</{target_agent}'s updated thoughts>\n</context {str(idx + 1)}>\n\n"
+            trace_str += (f"<context {str(idx + 1)}>\n{context_str.strip()}\n\n"
+                          f"<{target_agent}'s updated thoughts>{self._thoughts_block_prefix}{h['hypothesis']}"
+                          f"</{target_agent}'s updated thoughts>\n</context {str(idx + 1)}>\n\n")
             
         return {'text': trace_str.strip(), 'aggregated': True}
+
+    def _likelihood_ess(self, weight_results):
+        """Gate metric for Phase 1, measured on the PARSED subset only.
+
+        An imputed neutral weight is not a verdict and must not count toward
+        separation, so the mask is applied here rather than at the call site.
+        Subclasses whose scorer produces no parse mask override this.
+        """
+        mask = weight_results.get('parse_mask')
+        return (trace_log.ess(weight_results['weights'], mask=mask),
+                trace_log.ess_norm(weight_results['weights'], mask=mask))
 
     def _trace(self, text: str, target_agent=None):
         preprocessed_text = self.preprocess_input(text, target_agent)
@@ -1679,12 +1698,7 @@ class Tracer(BaseTracer):
                 # likelihood ESS is measured on the normalized likelihood vector
                 # ALONE, before any accumulation/flooring/resampling. It is the
                 # Phase 1 gate metric and must never be conflated with posterior ESS.
-                # Gate metric on the PARSED subset only: an imputed neutral
-                # weight is not a verdict and must not count toward separation.
-                likelihood_ess = trace_log.ess(
-                    weight_results['weights'], mask=weight_results.get('parse_mask'))
-                likelihood_ess_norm = trace_log.ess_norm(
-                    weight_results['weights'], mask=weight_results.get('parse_mask'))
+                likelihood_ess, likelihood_ess_norm = self._likelihood_ess(weight_results)
                 # PHASE 2: combine with the carried prior instead of overwriting it.
                 _L = [float(x) for x in weight_results['weights']]
                 for _r, _i in enumerate(sorted(range(len(_L)), key=lambda j: -_L[j]), start=1):
@@ -2133,226 +2147,13 @@ class TracerLight(Tracer):
 
         return {'text': final_hypothesis, 'likelihood': list(hypotheses.weights), 'aggregated': True, 'context': hypotheses.contexts[-1], 'perception': hypotheses.perceptions[-1], 'hypothesis': hypotheses_str}
 
-    def chain_weighted_average_trace(self, hypotheses_set_list: List[HypothesesSetV3]) -> dict:
-        """
-        Chain the trace of hypotheses using weighted average
+    _thoughts_block_prefix = "\n"
 
-        Args:
-            hypotheses (HypothesesSet): 
+    def _likelihood_ess(self, weight_results):
+        """TracerLight's scorer emits no parse mask, so the gate is measured on
+        the full likelihood vector and the normalized variant is not reported."""
+        return trace_log.ess(weight_results['weights']), None
 
-        Returns:
-            str: a summary of the hypothesis trace
-        """
-        target_agent = self.target_agent
-        averaged_hypotheses_list = [self.weighted_average_hypotheses(hypotheses) for hypotheses in hypotheses_set_list]
-
-        trace_str = ""
-        for idx, h in enumerate(averaged_hypotheses_list):
-            context_str = ""
-            if h['context']['state']:
-                context_str += f"{h['context']['state']}\n" # newly added
-                context_str += f"<note>{h['perception']['state']}</note>\n"
-            if h['context']['action']:
-                context_str += f"{h['context']['action']}\n"
-                if h['perception']['action']:
-                    context_str += f"<note>{h['perception']['action']}</note>"
-            trace_str += f"<context {str(idx + 1)}>\n{context_str.strip()}\n\n<{target_agent}'s updated thoughts>\n{h['hypothesis']}</{target_agent}'s updated thoughts>\n</context {str(idx + 1)}>\n\n"
-            
-        return {'text': trace_str.strip(), 'aggregated': True}
-
-    def _trace(self, text: str, target_agent=None):
-        preprocessed_text = self.preprocess_input(text, target_agent)
-        if preprocessed_text is None:
-            print(cf.bold | cf.magenta("Failed to identify the target agent."))
-            self.dump({'summary': ""}, [])
-            return ""
-        self.set_tracer_variables(preprocessed_text)
-
-        trajectory = preprocessed_text['trajectory']
-        perceptions_trajectory = preprocessed_text['perceptions']
-
-        hypotheses_list = []
-        context_history = []
-        self._accum = {}   # accumulated prior is per-trace
-        self._low_mass_run = 0
-        for idx, (state_action, perceptions) in enumerate(zip(trajectory, perceptions_trajectory)):
-            prop_ctx = None
-            if idx == 0:
-                new_hypotheses = self.initialize(state_action=state_action, perceptions=perceptions)
-            else:
-                existing_hypotheses = hypotheses_list[-1]
-                new_hypotheses = self.propagate(existing_hypotheses, state_action=state_action, perceptions=perceptions)
-                prop_ctx = self.interleave_context_and_perception(
-                    existing_hypotheses.contexts, existing_hypotheses.perceptions)
-
-            operators = []
-            weight_results = None
-            likelihood_ess = None
-            likelihood_ess_norm = None
-            accum_info = None
-            perturb_info = None
-            perturb_conditions = None
-            cap_info = None
-            split_info = None
-            pre_snapshot = []
-            ess = None
-            if state_action['action']:
-                weight_results = self.weigh(new_hypotheses, state_action['action'], mode="prompting")
-                # likelihood ESS is measured on the normalized likelihood vector
-                # ALONE, before any accumulation/flooring/resampling. It is the
-                # Phase 1 gate metric and must never be conflated with posterior ESS.
-                likelihood_ess = trace_log.ess(weight_results['weights'])
-                # PHASE 2: combine with the carried prior instead of overwriting it.
-                _L = [float(x) for x in weight_results['weights']]
-                for _r, _i in enumerate(sorted(range(len(_L)), key=lambda j: -_L[j]), start=1):
-                    if _i < len(new_hypotheses.hypotheses):
-                        new_hypotheses.hypotheses[_i]._likelihood_rank = _r
-                accum_info = self.accumulate(new_hypotheses, weight_results['weights'])
-                new_hypotheses.weight_details = weight_results
-
-                if self.args.n_hypotheses > 1:
-                    ess = compute_ess(new_hypotheses)
-                    # Snapshot before any operator rebuilds the population, so
-                    # post-resample parent_ids resolve and roots reconstruct.
-                    pre_snapshot = [
-                        {'particle_id': h.particle_id, 'lineage_id': h.lineage_id,
-                         'root_id': h.root_id, 'weight': float(w)}
-                        for h, w in zip(new_hypotheses.hypotheses, new_hypotheses.weights)
-                    ]
-                    # Threshold against the ACTUAL population, not the configured N.
-                    pop = len(new_hypotheses.hypotheses)
-                    # Threshold placed from the MEASURED density, not convention.
-                    # Pre-operator normalized ESS lives at 0.55-0.75 across 140
-                    # steps; N/2 = 0.50 sits on that shoulder, so crossings were
-                    # near-ties (a run fired at 0.49 vs 0.50) and resample count
-                    # varied 1-2 on the same context. N/3 = 0.333 sits in an
-                    # empty region: 0 steps within +/-0.05, while still catching
-                    # both genuine deep dips (0.15, 0.40). N/4 captures the same
-                    # two, so N/3 is the smaller change for the same effect.
-                    ess_divisor = float(getattr(self.args, 'ess_divisor', 3.0))
-                    if ess < pop / ess_divisor:
-                        new_hypotheses = resample_hypotheses_with_other_info(new_hypotheses, ess)
-                        operators.append('resample')
-                        self.sync_accumulator(new_hypotheses)
-                    # PHASE 2: `if`, not `elif`. Resampling duplicates particles and
-                    # REDUCES diversity, so it used to short-circuit the one operator
-                    # that could repair it. Confirmed on gold: step 2 had diversity
-                    # 0.219 (below the 0.25 trigger) AND ESS below threshold, so the
-                    # step that most needed jitter got 6 duplicates instead.
-                    #
-                    # Diversity is measured AFTER resampling now, so the post-resample
-                    # collapse is visible rather than hidden behind the pre-resample read.
-                    # PHASE 4: split (source) then merge (sink) in the SAME step.
-                    if getattr(self.args, 'enable_split', False):
-                        new_hypotheses, _sm = self.split_and_merge(new_hypotheses, prop_ctx)
-                        split_info = _sm
-                        if _sm.get('split_fired'):
-                            operators.append('split')
-                        if _sm.get('merged'):
-                            operators.append('merge')
-                        if _sm.get('split_fired') or _sm.get('merged'):
-                            new_hypotheses, _cap, _bound = self.enforce_population_cap(new_hypotheses)
-                            if _bound:
-                                operators.append('cap')
-                            cap_info = (_cap, _bound)
-                            self.sync_accumulator(new_hypotheses)
-                    overall_text_diversity = 1 - overall_jaccard_similarity(new_hypotheses.texts)
-                    if getattr(self.args, 'anchored_perturbation', False):
-                        # PHASE 3e trigger: root-mass ESS, not Jaccard.
-                        # Jaccard cannot see the failure -- measured particle ESS
-                        # 0.96 (healthy) against root-mass 0.16 (~1.3 effective
-                        # hypotheses of 8), with duplicates lexically identical
-                        # only until propagation rewrites them.
-                        rm = trace_log.root_mass_ess_over_n(new_hypotheses.hypotheses)
-                        thr = float(getattr(self.args, 'root_mass_threshold', 0.5))
-                        by_root = {}
-                        for j, h in enumerate(new_hypotheses.hypotheses):
-                            by_root.setdefault(h.root_id, []).append(j)
-                        # TWO conditions, recorded separately. Mass alone is not
-                        # collapse: root-mass ESS also falls when many distinct
-                        # roots hold concentrated weight, which is the filter
-                        # converging correctly and must not be perturbed.
-                        mass_cond = rm is not None and rm < thr
-                        collapse_cond = any(len(v) > 1 for v in by_root.values())
-                        # Sustained-stagnation counter: how many consecutive
-                        # steps root-mass has sat below threshold.
-                        self._low_mass_run = (self._low_mass_run + 1) if mass_cond else 0
-                        k = int(getattr(self.args, 'stagnation_steps', 3))
-                        # TWO PATHS, both minting new roots:
-                        #   collapse   -- duplicates exist; break the surplus copies apart
-                        #   stagnation -- no duplicates, but root-mass has been low for k
-                        #                 consecutive steps. This DECOUPLES repair from the
-                        #                 resampler: with the production trigger at N/4 the
-                        #                 resampler is a backstop and rarely fires, so tying
-                        #                 perturbation to collapse would leave the repair
-                        #                 machinery dormant. A transient dip is the filter
-                        #                 converging and must not be touched; a SUSTAINED one
-                        #                 is the hypothesis space going dead.
-                        stagnation_cond = (mass_cond and not collapse_cond
-                                           and self._low_mass_run >= k)
-                        perturb_conditions = (mass_cond, collapse_cond,
-                                              sum(len(v) - 1 for v in by_root.values() if len(v) > 1),
-                                              self._low_mass_run,
-                                              'collapse' if (mass_cond and collapse_cond)
-                                              else ('stagnation' if stagnation_cond else None))
-                        if mass_cond and (collapse_cond or stagnation_cond):
-                            # perturb only the OFFENDING particles: surplus copies
-                            # of over-represented roots, weakest first.
-                            idxs = []
-                            if collapse_cond:
-                                for _, members in sorted(by_root.items(), key=lambda kv: -len(kv[1])):
-                                    if len(members) > 1:
-                                        ranked = sorted(members, key=lambda j: float(new_hypotheses.weights[j]))
-                                        idxs.extend(ranked[:len(members) - 1])
-                            else:
-                                # stagnation: replace the LIGHTEST particles. They hold
-                                # effectively no mass, so nothing is lost, and a novel
-                                # commitment can be introduced without the resampler
-                                # having to destroy an old one first.
-                                nrep = max(1, len(new_hypotheses.hypotheses) // 4)
-                                idxs = sorted(range(len(new_hypotheses.hypotheses)),
-                                              key=lambda j: float(new_hypotheses.weights[j]))[:nrep]
-                                self._low_mass_run = 0
-                            if idxs:
-                                print(Panel(f"root-mass ESS {rm:.3f} < {thr}: perturbing {len(idxs)} particle(s)",
-                                            title="Diversity Collapse", style="red", box=box.SIMPLE_HEAD))
-                                res = self.perturb_anchored(new_hypotheses, idxs,
-                                                            prop_ctx if idx > 0 else None)
-                                operators.append('perturb')
-                                perturb_info = res
-                                new_hypotheses, _cap, _bound = self.enforce_population_cap(new_hypotheses)
-                                if _bound:
-                                    operators.append('cap')
-                                cap_info = (_cap, _bound)
-                                self.sync_accumulator(new_hypotheses)
-                    elif overall_text_diversity < 0.25:
-                        print(Panel(f"Text diversity: {overall_text_diversity}", title="Low Variance Hypotheses", style="red"))
-                        new_hypotheses = self.rejuvenate_hypotheses(new_hypotheses)
-                        operators.append('perturb')
-                        self.sync_accumulator(new_hypotheses)
-            else:
-                pass
-
-            self._log_step(idx, new_hypotheses, weight_results, operators,
-                           likelihood_ess=likelihood_ess, ess_value=ess,
-                           likelihood_ess_norm=likelihood_ess_norm,
-                           accum_info=accum_info, state_action=state_action,
-                           pre_snapshot=pre_snapshot, perturb_info=perturb_info,
-                           perturb_conditions=perturb_conditions, cap_info=cap_info,
-                           split_info=split_info)
-            hypotheses_list.append(new_hypotheses)
-
-            # update history
-            if state_action['state']:
-                context_history.append({'text': state_action['state'], 'action': False})
-            if state_action['action']:
-                context_history.append({'text': state_action['action'], 'action': True})
-
-        traced_thoughts = self.chain_weighted_average_trace(hypotheses_list)
-        trace_text = f"{self.trace_header}\n\n{traced_thoughts['text']}"
-
-        self.dump(traced_thoughts, hypotheses_list)
-        return trace_text
 
 class MultiTracerLight(TracerLight, MultiTracer):
     pass
