@@ -1654,6 +1654,7 @@ class Tracer(BaseTracer):
         self._accum = {}   # accumulated prior is per-trace
         self._low_mass_run = 0
         for idx, (state_action, perceptions) in enumerate(zip(trajectory, perceptions_trajectory)):
+            prop_ctx = None
             if idx == 0:
                 new_hypotheses = self.initialize(state_action=state_action, perceptions=perceptions)
             else:
@@ -1671,7 +1672,6 @@ class Tracer(BaseTracer):
             perturb_conditions = None
             cap_info = None
             split_info = None
-            prop_ctx = None
             pre_snapshot = []
             ess = None
             if state_action['action']:
@@ -2176,6 +2176,7 @@ class TracerLight(Tracer):
         self._accum = {}   # accumulated prior is per-trace
         self._low_mass_run = 0
         for idx, (state_action, perceptions) in enumerate(zip(trajectory, perceptions_trajectory)):
+            prop_ctx = None
             if idx == 0:
                 new_hypotheses = self.initialize(state_action=state_action, perceptions=perceptions)
             else:
@@ -2193,7 +2194,6 @@ class TracerLight(Tracer):
             perturb_conditions = None
             cap_info = None
             split_info = None
-            prop_ctx = None
             pre_snapshot = []
             ess = None
             if state_action['action']:
