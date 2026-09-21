@@ -19,7 +19,11 @@ import os
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
-MIN_STEPS = 5   # a run writing fewer than this is a failure, not a short run
+# A run writing far fewer steps than its trajectory has is a FAILURE, not a
+# short run. A flat floor of 5 let a crash at step 7 of a 34-step context pass
+# as success. Require most of the trajectory to have been traced.
+MIN_STEPS = 5
+MIN_FRACTION = 0.6
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "musing")
 
@@ -168,6 +172,7 @@ def make_args(**overrides) -> SimpleNamespace:
         enable_split=False,           # PHASE 4
         split_weight_quantile=0.20,   # calibrated at N=12: ~1.60x mean, 2.7 firings/run
         split_children=2,
+        protect_leader=1,          # keep the heaviest copy of each root
         merge_percentile=95.0,        # Phase 4 merge cut, resolved per run (jaccard)
     )
     args.update(overrides)
@@ -225,6 +230,8 @@ def main():
     ap.add_argument("--enable-split", action="store_true", help="PHASE 4 split+merge")
     ap.add_argument("--split-weight-quantile", type=float, default=0.20)
     ap.add_argument("--split-children", type=int, default=2)
+    ap.add_argument("--protect-leader", type=int, default=1,
+                    help="copies of each root kept safe from perturbation (0 = old behaviour)")
     ap.add_argument("--merge-percentile", type=float, default=95.0)
     ap.add_argument("--seed", type=int, default=None,
                     help="seed resampling draws. NOTE: fixes WHICH particles are duplicated, "
@@ -289,7 +296,8 @@ def main():
                      stagnation_steps=a.stagnation_steps,
                      enable_split=a.enable_split,
                      split_weight_quantile=a.split_weight_quantile,
-                     split_children=a.split_children)
+                     split_children=a.split_children,
+                     protect_leader=a.protect_leader)
     tracer = build_tracer(args)
 
     from trace_log import RunLogger
@@ -336,9 +344,11 @@ def main():
                 written = sum(1 for line in fh if line.strip())
         except OSError:
             written = 0
-        if written < MIN_STEPS:
+        expected = getattr(tracer, "_last_trajectory_len", 0) or 0
+        floor = max(MIN_STEPS, int(expected * MIN_FRACTION)) if expected else MIN_STEPS
+        if written < floor:
             print(f"!!! RUN FAILED: {run_id} wrote {written} steps "
-                  f"(minimum {MIN_STEPS}) -> {logger.path}")
+                  f"(minimum {floor}) -> {logger.path}")
             raise SystemExit(2)
         print(f"[ok] {run_id}: {written} steps written")
         print(json.dumps({k: summary[k] for k in (

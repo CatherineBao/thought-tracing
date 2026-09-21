@@ -1215,29 +1215,59 @@ class Tracer(BaseTracer):
             return results
 
         exclude = "\n".join(f"- {a}" for a in dict.fromkeys(live)) or "- (none recorded)"
+        k = len(idxs)
+        # ONE call for all k replacements, not k independent calls.
+        # Independent generation let the NEW commitments duplicate each other:
+        # 7 replacements once yielded "maintain his public image and reputation",
+        # "maintain his public image" and "preserve his reputation" -- about 3
+        # distinct ideas. Each call avoided the commitments already in play but
+        # could not see its siblings. Split gets this right by generating its
+        # children together; perturbation now does the same.
         sys_p = (
-            f"You propose an ALTERNATIVE account of what {target_agent} wants.\n\n"
-            f"Given the observations {target_agent} has had, propose a different standing "
-            f"commitment -- a different thing they are trying to achieve -- that is still "
+            f"You propose {k} ALTERNATIVE accounts of what {target_agent} wants.\n\n"
+            f"Given the observations {target_agent} has had, propose {k} different standing "
+            f"commitments -- different things they are trying to achieve -- each still "
             f"consistent with everything they have observed.\n\n"
             f"Rules:\n"
-            f"- It must be MUTUALLY EXCLUSIVE with every commitment already in play:\n{exclude}\n"
-            f"- It must not contradict anything {target_agent} demonstrably observed.\n"
-            f"- Change what they WANT, not merely the wording of what they believe.\n\n"
-            f"Answer exactly:\nCOMMITMENT: <one short clause>\nBELIEF: <one or two sentences "
-            f"on what {target_agent} believes under it>")
-
+            f"- The {k} new commitments must be MUTUALLY EXCLUSIVE WITH EACH OTHER. "
+            f"{target_agent} can hold at most one. Rewording the same goal is not a "
+            f"different goal.\n"
+            f"- They must also differ from every commitment already in play:\n{exclude}\n"
+            f"- None may contradict anything {target_agent} demonstrably observed.\n"
+            f"- Change what they WANT, not the wording of what they believe.\n\n"
+            f"Answer exactly {k} numbered lines:\n" +
+            "\n".join(f"{j+1}. COMMITMENT: <short clause> | BELIEF: <one or two sentences>"
+                       for j in range(k)))
         ctx = context_and_perception_str or ""
-        prompts = [f"<previous context>\n{ctx}\n</previous context>\n\n"
-                   f"<current account being replaced>\n{hypotheses.hypotheses[i].text}\n"
-                   f"</current account being replaced>\n\n"
-                   f"<its commitment>\n{hypotheses.hypotheses[i].anchor}\n</its commitment>"
-                   for i in idxs]
-        raw = self.tracer_model.batch_interact(
-            prompts, system_prompts=sys_p, temperature=0.7, max_tokens=1024, stage='perturb')
+        block = "\n".join(
+            f"{j+1}. currently: {hypotheses.hypotheses[i].anchor}"
+            for j, i in enumerate(idxs))
+        prompt = (f"<previous context>\n{ctx}\n</previous context>\n\n"
+                  f"<the {k} accounts to replace>\n{block}\n</the {k} accounts to replace>")
+        raw_one = self.tracer_model.interact(
+            prompt, system_prompt=sys_p, temperature=0.7, max_tokens=2048, stage='perturb')
+        found = re.findall(r"COMMITMENT\s*:\s*(.+?)\s*\|\s*BELIEF\s*:\s*(.+)", raw_one, re.I)
+        # drop any that duplicate an earlier one in this same batch
+        uniq, seen_c = [], set()
+        for c, b in found:
+            key = c.strip().lower().rstrip('.')
+            if key and key not in seen_c:
+                seen_c.add(key)
+                uniq.append((c.strip(), b.strip()))
+        results['proposed_raw'] = len(found)
+        results['proposed_unique'] = len(uniq)
+        raws = [None] * len(idxs)
+        for j in range(min(len(uniq), len(idxs))):
+            raws[j] = f"COMMITMENT: {uniq[j][0]}\nBELIEF: {uniq[j][1]}"
 
         cands = []
-        for i, r in zip(idxs, raw):
+        for i, r in zip(idxs, raws):
+            # a slot with no proposal: the batch returned fewer distinct
+            # commitments than there were particles to replace. Keep the
+            # original particle rather than inventing a duplicate for it.
+            if not r:
+                results['unparsed'].append(i)
+                continue
             m_c = re.search(r"COMMITMENT\s*:\s*(.+)", r, re.I)
             m_b = re.search(r"BELIEF\s*:\s*(.+)", r, re.I | re.S)
             if not m_c or not m_b:
@@ -1667,6 +1697,8 @@ class Tracer(BaseTracer):
 
         trajectory = preprocessed_text['trajectory']
         perceptions_trajectory = preprocessed_text['perceptions']
+        # recorded so the driver can tell a crashed run from a short one
+        self._last_trajectory_len = len(trajectory)
 
         hypotheses_list = []
         context_history = []
@@ -1797,10 +1829,22 @@ class Tracer(BaseTracer):
                             # of over-represented roots, weakest first.
                             idxs = []
                             if collapse_cond:
+                                # PROTECT THE LEADER. Perturbation replaces only the
+                                # SURPLUS copies of an over-represented root; the
+                                # heaviest copy is always kept, so a hypothesis that
+                                # is winning on evidence is never eliminated.
+                                #
+                                # Observed without this: a hypothesis holding 35% of
+                                # belief mass at turn 3 was gone by turn 5 -- resampling
+                                # concentrated copies onto it, and perturbation then
+                                # treated that concentration as redundancy to break up.
+                                # That works directly against the accumulator, whose
+                                # purpose is to let evidence compound across steps.
+                                protect = int(getattr(self.args, 'protect_leader', 1))
                                 for _, members in sorted(by_root.items(), key=lambda kv: -len(kv[1])):
-                                    if len(members) > 1:
-                                        ranked = sorted(members, key=lambda j: float(new_hypotheses.weights[j]))
-                                        idxs.extend(ranked[:len(members) - 1])
+                                    if len(members) > protect:
+                                        ranked = sorted(members, key=lambda j: -float(new_hypotheses.weights[j]))
+                                        idxs.extend(ranked[protect:])
                             else:
                                 # stagnation: replace the LIGHTEST particles. They hold
                                 # effectively no mass, so nothing is lost, and a novel
