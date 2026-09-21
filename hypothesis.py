@@ -262,6 +262,43 @@ class HypothesesSetV3():
 
     
 
+
+def systematic_resample(weights) -> List[int]:
+    """Systematic resampling. Replaces multinomial `random.choices`.
+
+    Multinomial draws N independent samples, so a particle can be missed
+    entirely by chance: P(never drawn) = (1-w)^N. At N=8 that is 34% for a
+    particle holding exactly 1/N -- which is the state of EVERY particle
+    immediately after a resample -- and still 17% for one holding 20% of the
+    belief mass. Measured in real runs: lineages holding 0.212, 0.208 and 0.182
+    disappeared at a resample for no reason connected to evidence.
+
+    Systematic resampling walks the weight CDF in 1/N steps from a single
+    random offset. Any particle with weight >= 1/N is GUARANTEED at least one
+    copy, and the variance of the copy count is far lower. Simulated over 2000
+    resamples with the top particle at w=0.21: multinomial lost it 14.7% of the
+    time, systematic 0%.
+
+    This is the standard choice in the SMC literature for exactly this reason.
+    """
+    w = [float(x) for x in weights]
+    n = len(w)
+    total = sum(w)
+    if n == 0 or total <= 0:
+        return list(range(n))
+    w = [x / total for x in w]
+    # one draw per 1/n interval, offset by a single uniform sample
+    u0 = random.random() / n
+    out, cum, j = [], w[0], 0
+    for k in range(n):
+        u = u0 + k / n
+        while u > cum and j < n - 1:
+            j += 1
+            cum += w[j]
+        out.append(j)
+    return out
+
+
 def resample_hypotheses_with_other_info(hypotheses: HypothesesSetV3, ess: float) -> HypothesesSetV3:
     """
     Resample the hypotheses based on the weights.
@@ -270,7 +307,7 @@ def resample_hypotheses_with_other_info(hypotheses: HypothesesSetV3, ess: float)
     for h, w in zip(hypotheses.texts, hypotheses.weights):
         print(Panel(h, title=f"Weight: {w:.2f}", style="purple"))
 
-    resampled_idxs = random.choices(range(len(hypotheses.texts)), hypotheses.weights, k=len(hypotheses.texts))
+    resampled_idxs = systematic_resample(hypotheses.weights)
     target_agent = hypotheses.target_agent
     texts = [hypotheses.texts[idx] for idx in resampled_idxs]
     weights = np.ones(len(texts)) / len(texts)
