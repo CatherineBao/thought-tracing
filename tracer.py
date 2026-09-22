@@ -30,6 +30,7 @@ import musing_layout
 import trace_log
 from trace_log import StepRecord, ParticleRecord, RunLogger
 from methods import METHODS, method_rule, contributing_methods
+from profiles import render_profile
 
 
 _ANSWER_PATTERNS = [
@@ -1164,6 +1165,36 @@ class Tracer(BaseTracer):
         self.target_agent = preprocessed_text['target_agent']
         self.trace_header = self.trace_base_header.replace("[target agent]", self.target_agent)
         self._role_prior = None
+        # EXTERNAL baseline profile. Rendered here, beside the role prior it
+        # parallels, so the two have the same lifetime: both are per-(trace,
+        # target) and neither may survive into the next context.
+        #
+        # No LLM call -- that is the point. The role prior below pays a call to
+        # read a seat off this transcript; a profile is what a system that has
+        # been watching this person for months already holds, so it costs
+        # nothing at trace time and, unlike the prior, is not confined to what
+        # this one context happens to reveal.
+        self._character_profile = None
+        if getattr(self.args, 'character_profile', False):
+            # Normally the traced agent's own record. Under --profile-as it is
+            # somebody else's, and the traced agent is scrubbed from the roster
+            # so the record does not refer to the person it is describing.
+            token = getattr(self.args, 'profile_as', None) or self.target_agent
+            self._character_profile = render_profile(
+                getattr(self.args, 'profiles', None), token,
+                getattr(self.args, 'profile_roster', None) or (),
+                exclude={self.target_agent}) or None
+            if self._character_profile:
+                tag = (f"{token} AS {self.target_agent} [SCRAMBLED]"
+                       if token != self.target_agent else self.target_agent)
+                print(Panel(self._character_profile[:600],
+                            title=f"Character profile (external) \u2014 {tag}",
+                            style="green", box=box.SIMPLE_HEAD))
+            else:
+                # Loud, because a silent miss turns a profile arm into a second
+                # copy of the baseline arm and the sweep still looks healthy.
+                print(f"[yellow]--character-profile set but no profile for "
+                      f"{self.target_agent}; running with no prior.[/yellow]")
 
     def infer_role_prior(self):
         """One call: what seat is this person sitting in, and what does that seat want?
@@ -1360,7 +1391,19 @@ class Tracer(BaseTracer):
             # commitment vocabulary is fixed by scene 0 -- which is why nothing ever
             # proposed forgiveness on the ATLA episode. The role prior is derived from
             # the WHOLE record, so it widens the seed without showing step 0 the future.
-            if getattr(self.args, 'infer_motive', False):
+            # An EXTERNAL profile answers the same question as the inferred
+            # prior and therefore replaces it HERE, rather than stacking with
+            # it: two SEAT/STAKE blocks in one prompt is the same claim twice,
+            # and the arms stop being separable. --infer-motive keeps the mint
+            # site regardless, which is where the two genuinely differ.
+            profile = getattr(self, '_character_profile', None)
+            if profile:
+                axis = (f"{axis} What is already known about {self.target_agent} from prior "
+                        f"working history, before this conversation began:\n{profile}\n"
+                        f"Let the hypotheses follow from that SEAT and STAKE. State the reason "
+                        f"the action is worth taking, never a description of what the action "
+                        f"accomplishes. ")
+            elif getattr(self.args, 'infer_motive', False):
                 rp = self.infer_role_prior()
                 if rp:
                     axis = (f"{axis} What is known about {self.target_agent}'s position from the "

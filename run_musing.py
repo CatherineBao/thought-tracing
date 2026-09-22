@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 from methods import METHODS, parse_methods
+from profiles import load_profiles, render_profile, profile_meta
 
 # A run writing far fewer steps than its trajectory has is a FAILURE, not a
 # short run. A flat floor of 5 let a crash at step 7 of a 34-step context pass
@@ -50,6 +51,11 @@ def load_corpus(corpus: str) -> Dict:
         "by_id": {s["set_id"]: s for s in sets},
         "gaps": gaps,
         "speakers": _read("speakers"),
+        # Optional, and read through profiles.load_profiles rather than _read:
+        # eight of the nine corpora have no profiles file, and _read raises on a
+        # missing one. That is right for dialogue/gaps/speakers -- a corpus
+        # without those is broken -- and wrong for this.
+        "profiles": load_profiles(corpus),
     }
 
 
@@ -143,6 +149,25 @@ def select_silver(corpus: Dict, limit=None) -> List[Dict]:
 # tracer construction
 # --------------------------------------------------------------------------
 
+def context_roster(ctx: Dict, remap: Dict = None) -> List[str]:
+    """Speakers in a context, most central first.
+
+    Ordered by turn count because render_profile caps the roster: if it has to
+    drop someone, the person who barely spoke is the right one to drop. Read off
+    the stitched `full_context` rather than the source sets' `speakers` lists,
+    so a coalition remap (--merge-speakers) is reflected -- the transcript the
+    tracer sees is the one the roster has to describe.
+    """
+    counts = {}
+    for line in (ctx.get("full_context") or "").split("\n"):
+        name = line.split(":", 1)[0].strip() if ":" in line else ""
+        # Speaker tokens are single, unique and prefix-free (see the corpus
+        # README); anything with whitespace is a wrapped continuation line.
+        if name and " " not in name:
+            counts[name] = counts.get(name, 0) + 1
+    return sorted(counts, key=lambda s: -counts[s])
+
+
 def make_args(**overrides) -> SimpleNamespace:
     args = dict(
         use_tracing=True,
@@ -171,6 +196,14 @@ def make_args(**overrides) -> SimpleNamespace:
         root_mass_threshold=0.5,      # 3e fires below this
         baseline_scorer=False,        # null hypothesis on the slate -> absolute fit + surprise
         infer_motive=False,           # abductive proposer + whole-record role prior
+        # EXTERNAL baseline profile, injected at SEEDING ONLY -- see profiles.py.
+        # Distinct from infer_motive, which derives its prior from the transcript
+        # and also speaks at the mint site. Keeping them separate is what lets
+        # the two be run as separate arms.
+        character_profile=False,
+        profiles=None,                # corpus profile records, or None
+        profile_roster=None,          # speakers present, most central first
+        profile_as=None,              # whose profile to hand over (scramble control)
         legacy_form=False,            # restore pre-G2 propagation + no commitment validator
         standard_prompt='v1',         # STANDARD_PROMPTS variant; see eval_motive_sep.py
         methods=None,                 # methods.py keys; None = default prompts, unchanged
@@ -283,6 +316,21 @@ def main():
                     help="derive a SEAT/STAKE prior from the whole record once, and ask the "
                          "proposer what would have to be TRUE for these messages to be worth "
                          "sending, instead of what the speaker wants")
+    ap.add_argument("--character-profile", action="store_true",
+                    help="seed hypotheses from an external baseline character profile "
+                         "(data/musing/<corpus>_profiles.json) instead of reading the "
+                         "prior off the transcript. SEEDING ONLY: it founds the first "
+                         "population and is used nowhere else, which is what an "
+                         "already-held understanding of someone represents. Not named "
+                         "--baseline (taken by the scorer null) and not --seed (the RNG).")
+    ap.add_argument("--profile-as", default=None, metavar="TOKEN",
+                    help="SCRAMBLE CONTROL: trace --target but hand the seeder "
+                         "TOKEN's profile instead of their own. If commitments "
+                         "follow the profile rather than the person, the prior is "
+                         "steering the output rather than carrying information "
+                         "about who is being traced -- which is the difference "
+                         "between an integration worth building and a prompt that "
+                         "makes any motive-shaped prose look like insight.")
     ap.add_argument("--baseline-scorer", action="store_true",
                     help="add a null hypothesis to the comparative slate and score each "
                          "hypothesis by its MARGIN over it (absolute fit, not just relative)")
@@ -508,6 +556,9 @@ def main():
                      alpha=a.alpha, beta=a.beta, eps_frac=a.eps_frac,
                      baseline_scorer=a.baseline_scorer or a.surprise_perturb,
                      infer_motive=a.infer_motive,
+                     character_profile=a.character_profile,
+                     profiles=corpus.get("profiles"),
+                     profile_as=a.profile_as,
                      revive_retired=a.revive_retired,
                      legacy_form=a.legacy_form,
                      standard_prompt=a.standard_prompt,
@@ -531,6 +582,14 @@ def main():
     for i, ctx in enumerate(contexts):
         print(f"[{ctx['role']}] {ctx['context_id']}  chars={ctx['stitched_chars']}")
         run_id = f"{a.run_id}-{a.corpus}-{a.role}-{i:03d}"
+        # Per-context, because the roster is a property of the transcript being
+        # traced, not of the run. The tracer renders from args at
+        # set_tracer_variables, so this has to be in place before trace().
+        args.profile_roster = context_roster(ctx)
+        pmeta = (profile_meta(corpus.get("profiles"),
+                              a.profile_as or ctx["target_agent"],
+                              args.profile_roster, traced=ctx["target_agent"])
+                 if a.character_profile else {})
         logger = RunLogger(a.output_dir, run_id, meta={
             "corpus": a.corpus,
             "role": ctx["role"],
@@ -576,6 +635,12 @@ def main():
             "set_ids": ctx.get("set_ids"),
             "missed_set_ids": ctx.get("missed_set_ids"),
             "scorer_mode": a.scorer_mode,
+            # Arm identity. audit_profile.py partitions on this; a run whose
+            # profile file was missing the target reads as character_profile
+            # true with profile_target null, which is visibly different from a
+            # run that had one -- rather than both reporting the same thing.
+            "character_profile": a.character_profile,
+            **pmeta,
         })
         tracer.attach_logger(logger)
         try:
