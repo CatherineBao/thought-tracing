@@ -66,6 +66,31 @@ AXES = ('anchor', 'standard')
 
 FORM_RISKS = ('low', 'med', 'high')
 
+# Where a method's GENERATION POINT sits relative to the record. This is the
+# coarser grouping the audit can report at, and it is a HYPOTHESIS about shared
+# mechanism, not a measured result -- the audit prints both levels precisely so
+# it can be falsified.
+#
+#   record         generate from what the record shows
+#   counterfactual generate from a state the record does NOT show -- an absence,
+#                  a future end state, evidence that does not exist
+#   stance         generate from the person's own position
+#   transfer       generate from a different case
+#
+# The cut that matters is record vs counterfactual. Measured on the ATLA
+# trajectory: the default prompts return scene-bound restatement ("Express
+# annoyance at Zuko", "Prompt Zuko to elaborate") plus one revenge motive in
+# three spellings, while premortem and silence -- which cannot read the answer
+# off the turn, because their generation point is not in it -- returned
+# standing dispositions ("Avoid being powerless again", "Maintain her
+# autonomy"). That is the axis DEBUG_HANDOFF.md names as the open problem, so
+# it is the axis worth being able to pool on.
+#
+# CAUTION: premortem and silence overlapped at jaccard 0.15 and 0.09 on two
+# seeds, i.e. 85-91% of what each found the other did not. Sharing a family
+# means they fail alike, NOT that either can replace the other.
+FAMILIES = ('record', 'counterfactual', 'stance', 'transfer')
+
 
 @dataclass(frozen=True)
 class Method:
@@ -90,6 +115,7 @@ class Method:
     split: str = ""
     standard: str = ""
     # --- pre-registration ---
+    family: str = 'record'
     axis: str = 'anchor'
     needs_action: bool = False
     needs_role_prior: bool = False
@@ -109,7 +135,7 @@ class Method:
 
 _ANOMALY = Method(
     key='anomaly', name='Anomaly detection',
-    axis='anchor', needs_action=True, form_risk='low',
+    family='record', axis='anchor', needs_action=True, form_risk='low',
     expected_failure="latches onto noise; a one-off oddity becomes a standing commitment",
     perturb=(
         "- METHOD -- anomaly detection. Begin from the single thing in the record that does "
@@ -126,7 +152,7 @@ _ANOMALY = Method(
 
 _ROLE = Method(
     key='role', name='Role play',
-    axis='anchor', needs_role_prior=True, form_risk='low',
+    family='stance', axis='anchor', needs_role_prior=True, form_risk='low',
     expected_failure=("first-person leakage, and sympathy -- inhabiting someone makes their "
                       "aim sound more coherent than the record supports"),
     perturb=(
@@ -143,7 +169,7 @@ _ROLE = Method(
 
 _SILENCE = Method(
     key='silence', name='Absence analysis',
-    axis='anchor', form_risk='high',
+    family='counterfactual', axis='anchor', form_risk='high',
     expected_failure="unfalsifiable -- an absence is consistent with almost any aim",
     perturb=(
         "- METHOD -- absence analysis. Reason from what is ABSENT rather than from what is "
@@ -162,7 +188,7 @@ _SILENCE = Method(
 
 _DEVIL = Method(
     key='devil', name="Devil's advocate",
-    axis='anchor', form_risk='low',
+    family='record', axis='anchor', form_risk='low',
     expected_failure=("produces the lexical negation of the leading account, which merge "
                       "absorbs on the same step; highest CONTRADICTS rate at the coherence gate"),
     perturb=(
@@ -180,7 +206,7 @@ _DEVIL = Method(
 
 _ACH = Method(
     key='ach', name='Competing hypotheses',
-    axis='anchor', needs_action=True, form_risk='low',
+    family='record', axis='anchor', needs_action=True, form_risk='low',
     expected_failure=("nearest to what the comparative scorer already does, so it may "
                       "reproduce the filter's own loop and add nothing"),
     perturb=(
@@ -197,7 +223,7 @@ _ACH = Method(
 
 _ASSUME = Method(
     key='assume', name='Key assumptions check',
-    axis='anchor', form_risk='low',
+    family='record', axis='anchor', form_risk='low',
     expected_failure="attacks assumptions in the prompt rather than assumptions in the record",
     perturb=(
         "- METHOD -- key assumptions check. Name to yourself what the accounts already in "
@@ -213,7 +239,7 @@ _ASSUME = Method(
 
 _PREMORTEM = Method(
     key='premortem', name='Premortem',
-    axis='anchor', form_risk='low',
+    family='counterfactual', axis='anchor', form_risk='low',
     expected_failure="imports a generic organisational failure story rather than reading this record",
     perturb=(
         "- METHOD -- premortem. Assume that six months from now this has gone badly for {t}: "
@@ -228,7 +254,7 @@ _PREMORTEM = Method(
 
 _PRESENTATION = Method(
     key='presentation', name='Self-presentation check',
-    axis='anchor', needs_role_prior=True, form_risk='med',
+    family='stance', axis='anchor', needs_role_prior=True, form_risk='med',
     expected_failure=("trips the instruction-verb validator -- the natural phrasing starts "
                       "\"tell...\", which is a move against another character, not an aim"),
     perturb=(
@@ -249,7 +275,7 @@ _PRESENTATION = Method(
 
 _CRYSTAL = Method(
     key='crystal', name='Crystal ball',
-    axis='standard', form_risk='low',
+    family='counterfactual', axis='standard', form_risk='low',
     expected_failure="proposes evidence so ideal it is unbounded by the corpus",
     standard=(
         "  METHOD -- crystal ball. Suppose a perfect source existed: someone who could answer "
@@ -262,7 +288,7 @@ _CRYSTAL = Method(
 
 _BACKCAST = Method(
     key='backcast', name='Backcasting from outcomes',
-    axis='anchor', form_risk='med',
+    family='counterfactual', axis='anchor', form_risk='med',
     expected_failure=("produces an end state where a commitment belongs -- exactly the "
                       "\"commitment restated as an outcome\" the STANDARD prompts already forbid"),
     perturb=(
@@ -280,7 +306,7 @@ _BACKCAST = Method(
 
 _SIGNPOST = Method(
     key='signpost', name='Indicators',
-    axis='standard', form_risk='low',
+    family='counterfactual', axis='standard', form_risk='low',
     expected_failure="names indicators so generic they would appear under any account",
     standard=(
         "  METHOD -- indicators. State what would have to be OBSERVED for this account to be "
@@ -293,7 +319,7 @@ _SIGNPOST = Method(
 
 _ANALOGY = Method(
     key='analogy', name='Structured analogy',
-    axis='anchor', form_risk='med',
+    family='transfer', axis='anchor', form_risk='med',
     expected_failure=("imports the other case's vocabulary, which inverts the boundness "
                       "metric and breaks the one-org scoping rule"),
     perturb=(
@@ -390,6 +416,12 @@ def seeding_methods(method_list):
     return contributing_methods(method_list, 'seed')
 
 
+def family_of(key):
+    """The family `key` belongs to, or '(none)' for an unlabelled particle."""
+    m = METHODS.get(key or "")
+    return m.family if m else '(none)'
+
+
 def parse_methods(raw):
     """'anomaly,silence' -> ['anomaly', 'silence']. Raises on an unknown key.
 
@@ -417,6 +449,7 @@ for _k, _m in METHODS.items():
     assert _k == _m.key, f"{_k} keyed as {_m.key}"
     assert _m.axis in AXES, f"{_k}: bad axis {_m.axis!r}"
     assert _m.form_risk in FORM_RISKS, f"{_k}: bad form_risk {_m.form_risk!r}"
+    assert _m.family in FAMILIES, f"{_k}: bad family {_m.family!r}"
     assert _m.expected_failure, f"{_k}: no expected_failure -- the audit has nothing to score against"
     if _m.axis == 'standard':
         assert _m.standard, f"{_k}: standard-axis method with no standard fragment"

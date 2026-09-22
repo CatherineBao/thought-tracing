@@ -45,7 +45,7 @@ import os
 import re
 import sys
 
-from methods import METHODS
+from methods import METHODS, FAMILIES, family_of
 from restatement import BOUND, bag, stem
 
 # A clause has to survive this many steps to count as anything but noise. Three
@@ -189,16 +189,27 @@ def echo_for(clause, steps, axis='anchor'):
 # pass 1 -- unique yield
 # --------------------------------------------------------------------------
 
-def pass1(events, baseline_stems):
-    """Per method: which of its founded clauses no other method, and no
-    baseline run, also produced.
+def pass1(events, baseline_stems, keyfn=None):
+    """Per group: which of its founded clauses no OTHER group, and no baseline
+    run, also produced.
 
     Canonicalised by stem, so "Define 2-Purple by pigment" and "Define 2-Purple
     by HPLC" are one idea. Without that, novelty measures phrasing.
+
+    `keyfn` chooses the grouping. By method is the default and the finest
+    attribution available. By FAMILY pools methods that share a generation
+    mechanism, and the two answer different questions: two methods in one
+    family that each found something the other missed are counted as two unique
+    clauses by method and as two unique clauses by family, but a clause BOTH
+    found is unique at family level and unique at NEITHER method level. So
+    family novelty is not the sum of its methods', and pooling can only raise
+    it. That is the point -- it is the measurement that survives when the
+    per-method split is too thin to read.
     """
+    keyfn = keyfn or (lambda e: e["method"])
     by_method = collections.defaultdict(list)
     for e in events.values():
-        by_method[e["method"]].append(e)
+        by_method[keyfn(e)].append(e)
     stems_of = {m: {stem(e["clause"]) for e in es} for m, es in by_method.items()}
     out = {}
     for m, es in by_method.items():
@@ -240,7 +251,7 @@ def classify(e, echo):
     return 'hidden'
 
 
-def pass2(p1, steps, axis='anchor'):
+def pass2(p1, steps, axis='anchor'):  # noqa: D401
     for m, d in p1.items():
         counts = collections.Counter()
         for e in d["unique"]:
@@ -292,29 +303,51 @@ def judge(model, transcript, clauses, target):
 # controls
 # --------------------------------------------------------------------------
 
-def seed_floor(runs, axis='anchor'):
-    """Same method, different seed: the novelty rate that means nothing.
+def seed_floor(runs, axis='anchor', keyfn=None):
+    """Same configuration, different seed: the novelty rate that means nothing.
 
-    Two seeds of one method also produce commitments unique to each other.
-    Any cross-method novelty number that does not clear this is measuring the
-    sampler. Reported, never silently subtracted.
+    Two seeds of one method also produce commitments unique to each other, and
+    any novelty number that does not clear that rate is measuring the sampler.
+    Reported, never silently subtracted.
+
+    MEASURED AT THE SAME GRANULARITY AS THE ROWS IT GATES. A family pools
+    several methods, so it has more chances to rediscover its own stems across
+    seeds and its floor is not the run's floor -- comparing a family novelty
+    against a whole-run floor would be comparing two different quantities.
+    Returns (overall, n_pairings, {group: floor}).
     """
     per_run = []
     for r in runs:
         loaded = steps_for(r)
         if not loaded:
             continue
-        steps = loaded[0][1]
-        ev = founding_events(steps, axis)
-        per_run.append({stem(e["clause"]) for e in ev.values()})
+        ev = founding_events(loaded[0][1], axis)
+        groups = collections.defaultdict(set)
+        allst = set()
+        for e in ev.values():
+            groups[keyfn(e) if keyfn else e["method"]].add(stem(e["clause"]))
+            allst.add(stem(e["clause"]))
+        per_run.append((allst, groups))
     if len(per_run) < 2:
-        return None, 0
-    rates = []
-    for i in range(len(per_run)):
-        others = set().union(*[s for j, s in enumerate(per_run) if j != i])
-        if per_run[i]:
-            rates.append(len(per_run[i] - others) / len(per_run[i]))
-    return (sum(rates) / len(rates), len(rates)) if rates else (None, 0)
+        return None, 0, {}
+
+    def rate(sets):
+        out = []
+        for i, si in enumerate(sets):
+            others = set().union(*[s for j, s in enumerate(sets) if j != i]) \
+                if len(sets) > 1 else set()
+            if si:
+                out.append(len(si - others) / len(si))
+        return sum(out) / len(out) if out else None
+
+    overall = rate([a for a, _ in per_run])
+    per_group = {}
+    for g in set().union(*[set(gr) for _, gr in per_run]):
+        sets = [gr.get(g, set()) for _, gr in per_run]
+        # a group absent from a seed has no pairing to measure
+        if sum(1 for x in sets if x) >= 2:
+            per_group[g] = rate(sets)
+    return overall, len(per_run), per_group
 
 
 # --------------------------------------------------------------------------
@@ -332,6 +365,10 @@ def main():
     ap.add_argument("--axis", default="anchor", choices=("anchor", "standard"),
                     help="standard-axis methods (crystal, signpost) found no anchors; "
                          "audit them on the settling condition instead")
+    ap.add_argument("--by-family", action="store_true",
+                    help="pool methods that share a generation mechanism "
+                         "(methods.py FAMILIES) instead of reporting each one. "
+                         "Use when the per-method split is too thin to read.")
     ap.add_argument("--judge", action="store_true",
                     help="run pass 3 (the only pass that calls an LLM)")
     ap.add_argument("--model", default="gemini-2.5-flash")
@@ -359,7 +396,8 @@ def main():
         print("!! no --baseline: a commitment the default prompts already produce "
               "will be counted as a method's yield", file=sys.stderr)
 
-    p = pass2(pass1(events, baseline_stems), steps, a.axis)
+    keyfn = (lambda e: family_of(e["method"])) if a.by_family else None
+    p = pass2(pass1(events, baseline_stems, keyfn), steps, a.axis)
 
     labelled = [m for m in p if m != "(none)"]
     if not labelled:
@@ -374,15 +412,34 @@ def main():
     unattributable = [k for k in declared
                       if k in METHODS and METHODS[k].axis == 'standard']
 
-    print(f"\n{os.path.basename(path)}   axis={a.axis}   {len(steps)} steps\n")
-    print(f"{'method':<14}{'found':>6}{'uniq':>6}{'novel':>7}"
-          f"{'hidden':>8}{'unearn':>8}{'restate':>9}{'noise':>7}   predicted failure")
+    # which methods actually appear, per group -- a family row backed by one
+    # method is a family row in name only and must say so
+    members = collections.defaultdict(set)
+    for e in events.values():
+        members[family_of(e["method"]) if a.by_family else e["method"]].add(
+            e["method"])
+
+    head = 'family' if a.by_family else 'method'
+    tail = 'methods present' if a.by_family else 'predicted failure'
+    print(f"\n{os.path.basename(path)}   axis={a.axis}   {len(steps)} steps"
+          f"   grouped by {head}\n")
+    print(f"{head:<15}{'found':>6}{'uniq':>6}{'novel':>7}"
+          f"{'hidden':>8}{'unearn':>8}{'restate':>9}{'noise':>7}   {tail}")
     for m in sorted(p, key=lambda k: -p[k]["n_unique"]):
         d, c = p[m], p[m]["classes"]
-        pred = METHODS[m].expected_failure if m in METHODS else ""
-        print(f"{m:<14}{d['total']:>6}{d['n_unique']:>6}{d['novelty']:>7.2f}"
+        if a.by_family:
+            note = ", ".join(sorted(x for x in members[m] if x))
+        else:
+            note = (METHODS[m].expected_failure if m in METHODS else "")[:46]
+        print(f"{m:<15}{d['total']:>6}{d['n_unique']:>6}{d['novelty']:>7.2f}"
               f"{c['hidden']:>8}{c['unearned']:>8}{c['restatement']:>9}{c['noise']:>7}"
-              f"   {pred[:46]}")
+              f"   {note}")
+    if a.by_family:
+        thin = [m for m in p if m != "(none)" and
+                len([x for x in members[m] if x]) < 2]
+        if thin:
+            print(f"\n  {', '.join(thin)}: one method only -- pooling changed "
+                  f"nothing for these rows.")
 
     if unattributable:
         print(f"\nnot in the table: {', '.join(unattributable)} -- standard-axis, so "
@@ -393,17 +450,30 @@ def main():
               "against a baseline.")
 
     if a.seeds:
-        floor, n = seed_floor([s.strip() for s in a.seeds.split(",") if s.strip()], a.axis)
+        floor, n, per_group = seed_floor(
+            [s.strip() for s in a.seeds.split(",") if s.strip()], a.axis, keyfn)
         if floor is None:
-            print(f"\nnoise floor: not computable (need >=2 runs)")
+            print("\nnoise floor: not computable (need >=2 runs)")
         else:
-            print(f"\nnovelty noise floor (same method, {n} seed pairings): {floor:.2f}")
-            beat = [m for m in labelled if p[m]["novelty"] > floor]
+            print(f"\nnovelty noise floor, same config across {n} seeds: "
+                  f"{floor:.2f} overall")
+            beat, short = [], []
+            for m in labelled:
+                f = per_group.get(m)
+                if f is None:
+                    short.append(m)          # not present in both seeds
+                elif p[m]["novelty"] > f:
+                    beat.append(f"{m} ({p[m]['novelty']:.2f} vs {f:.2f})")
+            for m in sorted(per_group):
+                if m in labelled:
+                    print(f"    {m:<15}{per_group[m]:>6.2f}")
             if beat:
-                print(f"  methods clearing it: {', '.join(beat)}")
+                print(f"  clearing its own floor: {', '.join(beat)}")
             else:
-                print("  methods clearing it: NONE -- every novelty figure above "
-                      "is within sampling variance")
+                print("  clearing its own floor: NONE -- every novelty figure "
+                      "above is within sampling variance")
+            if short:
+                print(f"  no floor for {', '.join(short)}: absent from one seed")
     else:
         print("\n!! no --seeds: the novelty column has no noise floor and should not "
               "be read as a ranking")

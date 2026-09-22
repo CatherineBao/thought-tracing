@@ -26,6 +26,40 @@ import tracer
 # registry
 # --------------------------------------------------------------------------
 
+def test_every_method_has_a_family():
+    from methods import FAMILIES, family_of
+    for k, m in METHODS.items():
+        assert m.family in FAMILIES, (k, m.family)
+        assert family_of(k) == m.family
+    assert family_of(None) == '(none)'
+    assert family_of('nonsense') == '(none)'
+    # the cut the grouping exists for: premortem and silence generate from a
+    # state the record does not show, which is why both escaped the baseline's
+    # scene-bound restatement
+    assert METHODS['premortem'].family == METHODS['silence'].family == 'counterfactual'
+    assert METHODS['anomaly'].family == METHODS['ach'].family == 'record'
+
+
+def test_family_pooling_cannot_lower_novelty():
+    # pooling gives a group MORE stems, so a clause one member found and
+    # another did not is unique at family level; the pooled figure can only
+    # rise or hold, never fall
+    from audit_methods import pass1
+    from methods import family_of
+    ev = {
+        (1, 'a'): {'clause': 'Avoid being powerless again', 'method': 'premortem',
+                   'root_id': 'r1'},
+        (2, 'b'): {'clause': 'Maintain her autonomy', 'method': 'silence',
+                   'root_id': 'r2'},
+    }
+    by_m = pass1(dict(ev), set())
+    by_f = pass1(dict(ev), set(), lambda e: family_of(e['method']))
+    assert set(by_m) == {'premortem', 'silence'}
+    assert set(by_f) == {'counterfactual'}
+    assert by_f['counterfactual']['novelty'] >= max(
+        by_m[m]['novelty'] for m in by_m)
+
+
 def test_registry_is_the_twelve():
     assert set(METHODS) == {
         'anomaly', 'role', 'silence', 'devil', 'ach', 'assume',
