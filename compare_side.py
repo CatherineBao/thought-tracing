@@ -1,5 +1,6 @@
 """Side-by-side: same context, same N, same turns. Only the filter differs."""
 import glob, html, sys
+import musing_layout as ml
 import trace_log as t
 
 CW, PL, PR, H, Y0 = 470, 52, 60, 250, 26
@@ -81,8 +82,8 @@ def stats(st):
     }
 
 
-b = sorted(glob.glob("musing_out/ab_before_1*.steps.jsonl"))
-a = sorted(glob.glob("musing_out/ab_after_1*.steps.jsonl"))
+b = ml.find("ab_before_1*.steps.jsonl")
+a = ml.find("ab_after_1*.steps.jsonl")
 if not b or not a:
     sys.exit("need both arms")
 bs, as_ = t.read_steps(b[0]), t.read_steps(a[0])
@@ -105,7 +106,8 @@ td,th{border-bottom:1px solid var(--line);padding:7px 10px;text-align:left}
 th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
 td.b{color:var(--bc);font-weight:600}td.a{color:var(--ac);font-weight:600}"""
 
-open("musing_out/side_by_side.html", "w", encoding="utf-8").write(
+OUT = ml.report_path("side_by_side.html")
+open(OUT, "w", encoding="utf-8").write(
     f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
     f'<meta name="viewport" content="width=device-width,initial-scale=1">'
     f'<title>Before / after</title><style>{CSS}</style></head><body><div class="wrap">'
@@ -116,4 +118,4 @@ open("musing_out/side_by_side.html", "w", encoding="utf-8").write(
     f'<div class="row"><div class="col">{psvg}</div><div class="col">{qsvg}</div></div>'
     f'<table><tr><th></th><th>before</th><th>after</th></tr>{rows}</table>'
     f'</div></body></html>')
-print(f"wrote musing_out/side_by_side.html  before={bl} lines  after={al} lines")
+print(f"wrote {OUT}  before={bl} lines  after={al} lines")

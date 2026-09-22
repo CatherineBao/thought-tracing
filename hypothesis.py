@@ -9,7 +9,7 @@ from trace_log import new_particle_id
 
 
 class HypothesisV3():
-    def __init__(self, target_agent: str, contexts: List[str], perceptions: List[dict], text: str, weight: float, parent_hypothesis: 'HypothesisV3' = None, anchor: str = None, particle_id: str = None, raw_accumulator: float = None, lineage_id: str = None):
+    def __init__(self, target_agent: str, contexts: List[str], perceptions: List[dict], text: str, weight: float, parent_hypothesis: 'HypothesisV3' = None, anchor: str = None, particle_id: str = None, raw_accumulator: float = None, lineage_id: str = None, standard: str = None):
         self.target_agent = target_agent
         self.contexts = contexts
         # self.context_history = context_history
@@ -51,6 +51,18 @@ class HypothesisV3():
         # The distinguishing goal-level commitment. Inherited on propagation,
         # replaced on split and on anchor revision, differentiated on resample.
         self.anchor = anchor if anchor is not None else (parent_hypothesis.anchor if parent_hypothesis is not None else None)
+        # What would SETTLE the question for them -- the evidence they would
+        # accept as showing they were wrong. Distinct from the anchor on
+        # purpose: two people can hold the same aim and still disagree about
+        # what counts as having met it, and that disagreement is invisible to
+        # a representation that only records wants. Measured on the Bloomfield
+        # purple dispute, that is exactly the axis the parties separate on --
+        # Wolf judges a count by what is delivered to the grower, the
+        # engineers by what the pipeline can reproduce -- and the filter had
+        # to encode it as a status motive because it had nowhere else to put
+        # it. Travels WITH the anchor: propagation inherits both, and anything
+        # that founds a new root supplies a new one.
+        self.standard = standard if standard is not None else (parent_hypothesis.standard if parent_hypothesis is not None else None)
         # Unnormalized accumulated log-weight. The particle's own evidence
         # trajectory; the only series reversals may be counted on.
         self.raw_accumulator = raw_accumulator if raw_accumulator is not None else 0.0
@@ -60,7 +72,12 @@ class HypothesisV3():
     def note_operator(self, name: str):
         self.operators.append(name)
 
-    def update_anchor(self, new_anchor: str, revision: bool = False, founds_root: bool = True):
+    def update_standard(self, new_standard):
+        if new_standard:
+            self.standard = new_standard
+
+    def update_anchor(self, new_anchor: str, revision: bool = False, founds_root: bool = True,
+                      standard: str = None):
         """Set the anchor. A NEW anchor founds a NEW root.
 
         ANCHOR IDENTITY == ROOT IDENTITY. The anchor is the particle's
@@ -79,6 +96,10 @@ class HypothesisV3():
         """
         changed = new_anchor is not None and new_anchor != self.anchor
         self.anchor = new_anchor
+        # A new commitment brings its own standard; without this the particle
+        # keeps the settling condition of the commitment it just replaced.
+        if changed:
+            self.standard = standard
         if changed and founds_root:
             self.root_id = new_particle_id()
         if revision:

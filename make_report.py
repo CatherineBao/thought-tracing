@@ -1,12 +1,13 @@
 """Self-contained before/after HTML report. Offline: no CDN, no external font."""
 import glob, html, json, statistics
+import musing_layout as ml
 import trace_log as t
 
 W, PL, PR = 900, 56, 20
 
 def load(pat, min_steps=20):
     out = []
-    for f in sorted(glob.glob(pat)):
+    for f in ml.find(pat):
         st = t.read_steps(f)
         if len(st) >= min_steps:
             out.append((f.split("/")[-1].split("-")[0], st))
@@ -105,9 +106,9 @@ def chart_bars(bsum, asum):
         o.append(f'<text x="{PL+max(1,(W-PL-PR)*aa/mx)+6:.1f}" y="{yy+28}" class="tk">{aa} after</text>')
     return f'<svg viewBox="0 0 {W} {y0+h}" class="c">' + "".join(o) + "</svg>"
 
-before = load("musing_out/p2clean*.steps.jsonl")
-after  = load("musing_out/p3e_n2_*.steps.jsonl")
-demo   = load("musing_out/demo*.steps.jsonl")
+before = load("p2clean*.steps.jsonl")
+after  = load("p3e_n2_*.steps.jsonl")
+demo   = load("demo*.steps.jsonl")
 demo_st = demo[0][1] if demo else after[0][1]
 
 def agg(runs):
@@ -234,7 +235,7 @@ improve the output is <b>unproven</b> on the tasks tested.</p>
 </div>
 """
 
-open("musing_out/before_after.html", "w", encoding="utf-8").write(
+open(ml.report_path("before_after.html"), "w", encoding="utf-8").write(
     f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
     f'<meta name="viewport" content="width=device-width,initial-scale=1">'
     f'<title>Particle filter: before &amp; after</title><style>{CSS}</style></head>'

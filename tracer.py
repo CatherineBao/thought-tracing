@@ -26,6 +26,7 @@ from utils import (
     NpEncoder
 )
 from hypothesis import compute_ess, extract_question, resample_hypotheses_with_other_info, HypothesesSetV3
+import musing_layout
 import trace_log
 from trace_log import StepRecord, ParticleRecord, RunLogger
 
@@ -73,6 +74,331 @@ def extract_answer_span(response: str):
     return response.strip(), ""
 
 
+# A COMMITMENT is what the target is trying to achieve, in the target's own
+# terms. Split and anchored perturbation both mint commitments from free text,
+# and both were unconstrained: once the positional-likelihood bug was fixed and
+# split started firing for the first time, 23 of 42 anchors in one run came back
+# as requests to another character ("Ask Zuko to leverage any Fire Nation
+# intelligence networks ..."). That is the next conversational move, not an aim,
+# and --use-anchor then conditions propagation on it.
+#
+# Rejecting is safe here in a way that guessing is not: a dropped child means
+# one fewer split, while a bad anchor founds a root and persists.
+COMMITMENT_MAX_WORDS = 8
+_BAD_COMMITMENT_VERB = re.compile(
+    r"^\s*\**\s*(ask|asks|asking|prompt|prompts|inquire|inquires|question|questions|"
+    r"tell|tells|request|requests|demand|demands|urge|urges|get|have|make)\b", re.I)
+# "?" is decisive: a commitment is never interrogative.
+_INTERROGATIVE = re.compile(r"\?\s*$|^\s*(why|how|what|whether|does|do|is|are|can|should|would)\b", re.I)
+
+
+_ACK_OPENING = re.compile(
+    r"^\s*(hi|hola|hey|hello|ok|okay|thanks|thank you|tha ?k you|thx|merry|happy|great|"
+    r"perfect|sure|yes|yep|no problem|got it|noted|will do|understood|good morning)\b", re.I)
+
+
+def action_content_words(action):
+    """Content words in an utterance, ignoring the speaker prefix and mentions."""
+    a = re.sub(r"^[^:\n]{0,40}:\s*", "", action or "")
+    a = re.sub(r"<@[A-Z0-9]+>", " ", a)
+    a = re.sub(r"&[a-z]+;", " ", a)
+    return len(re.findall(r"[A-Za-z0-9]+", a))
+
+
+def is_low_content(action, min_words=7, ack_words=12):
+    """Can this utterance reveal a commitment at all?
+
+    A bare "Okay! Thanks!" cannot, whatever a scorer says about it, so this is
+    decided deterministically rather than asked. It exists because the routine
+    null could not: asked to choose between "no commitment explains this" and
+    "this is routine traffic -- scheduling, logistics, tooling", the model
+    matched LONG scheduling messages to the routine null and left bare
+    acknowledgements to the generic one. Measured on v5_bb_Rodriguez, surprise
+    fired on 25 steps of which 16 opened with an acknowledgement and 8 were six
+    words or shorter, while off_topic caught the 41-word logistics messages --
+    exactly inverted. Length is the signal the wording could not carry.
+    """
+    n = action_content_words(action)
+    if n < min_words:
+        return True
+    return bool(_ACK_OPENING.match((action or "").split(":", 1)[-1].strip())) and n <= ack_words
+
+
+def compose_aim_belief(raw, target_agent):
+    """Flatten a propagated AIM/BELIEF response into the single belief text.
+
+    Downstream -- the scorer, the summary, every eval -- consumes
+    `hypotheses.texts` as one string, so the two fields are composed rather
+    than stored apart. Keeping the AIM sentence IN the text is the point: it is
+    what makes the belief say why the target is acting, and it makes text and
+    anchor comparable, which is what the anchor/text divergence in FINDINGS.md
+    §4 lacked.
+
+    Degrades to the raw response if the fields are absent. Propagation runs on
+    every particle on every step, so a parse failure must never lose a belief;
+    that is strictly worse than an unlabelled one.
+    """
+    if not raw or not raw.strip():
+        return raw or ""
+    m_a = re.search(r"AIM\s*:\s*(.+?)(?=\n\s*BELIEF\s*:|$)", raw, re.I | re.S)
+    m_b = re.search(r"BELIEF\s*:\s*(.+)", raw, re.I | re.S)
+    if not m_a and not m_b:
+        return raw.strip()
+    aim = " ".join(m_a.group(1).split()).strip().strip("*").strip() if m_a else ""
+    belief = " ".join(m_b.group(1).split()).strip().strip("*").strip() if m_b else ""
+    if aim and not aim.endswith((".", "!", "?")):
+        aim += "."
+    return (f"{aim} {belief}".strip() if aim else belief) or raw.strip()
+
+
+# ---------------------------------------------------------------------------
+# STANDARD prompt variants.
+#
+# The field is tuned against eval_motive_sep.py, which scores whether two
+# groups' settlement modes separate THE SAME WAY across independent seeds.
+# A variant is kept only if it raises that score, and the variants live here
+# rather than inline so a run records which one it used and two runs are
+# comparable.
+#
+#   v1  the first working version: "what would settle it", one worked example
+#   v2  names WHO supplies the evidence and WHOSE acceptance ends the question
+#
+# {t} is the target's name.
+# ---------------------------------------------------------------------------
+STANDARD_PROMPTS = {
+    "v1": (
+        "- The STANDARD is what would SETTLE the question for {t}: the evidence they "
+        "would accept as showing they were wrong. It is not what they want and not "
+        "what they believe -- it is the test they would apply. Two proposals may "
+        "share an aim and differ only here.\n"
+    ),
+    # v1 left WHO free, so the same hypothesis came back as "a recount shows a
+    # lower number" on one seed and "the customer confirms the count" on the
+    # next -- the axis moved between runs while the aim stayed put. Naming the
+    # source and the acceptor makes the two halves of the answer explicit
+    # instead of implicit in phrasing.
+    "v2": (
+        "- The STANDARD is what would SETTLE the question for {t}. Give it in two "
+        "parts, in this order and in one sentence:\n"
+        "    WHO OR WHAT produces the evidence -- a named person, a customer or "
+        "grower, an instrument or measurement, or a written document; and\n"
+        "    WHOSE ACCEPTANCE ends the question -- who has to be satisfied before "
+        "{t} stops pressing.\n"
+        "  Do not hedge between sources. If {t} would be satisfied by a colleague "
+        "saying so, say that; if only a measurement would do, say that. The "
+        "difference between those two answers is the point.\n"
+        "  It is NOT the commitment restated as an outcome: \"Prevent mislabeling\" "
+        "-> \"no images are mislabeled\" is WRONG, that is the aim achieved rather "
+        "than evidence of it.\n"
+    ),
+    # v3: the instability is that a standard is invented per COMMITMENT, from
+    # plausibility, while the thing we want to measure is a property of the
+    # PERSON. Commitments churn every step; the person does not. Tying the
+    # answer to what the target has visibly accepted or refused in the record
+    # makes it a reading rather than a guess.
+    "v3": (
+        "- The STANDARD is what would SETTLE the question for {t}, and it must be "
+        "grounded in the record you have been shown, not in what is generally "
+        "reasonable.\n"
+        "  Look at what {t} has actually treated as settling something so far: what "
+        "they accepted without argument, what they kept pressing on after an answer, "
+        "and what made them stop pressing. Answer in that pattern.\n"
+        "  Say WHO OR WHAT supplies the evidence -- a named colleague, a customer or "
+        "grower, a measurement or instrument, or a written document.\n"
+        "  If the record does not show {t} accepting that kind of evidence, do not "
+        "propose it.\n"
+        "  It is NOT the commitment restated as an outcome: \"Prevent mislabeling\" "
+        "-> \"no images are mislabeled\" is WRONG.\n"
+    ),
+    # v4: attacks MEASUREMENT noise rather than the model. Free-text standards
+    # vary in phrasing, and the scorer then bins them inconsistently -- 39% of
+    # Wolf's standards fell in no bin at all, which alone could flip a modal
+    # gap between seeds. Forcing a choice from a fixed set removes the binning
+    # step from the loop. The set is deliberately about the SOURCE of evidence,
+    # which is the distinction the corpus turned out to carry.
+    "v4": (
+        "- The STANDARD has two parts, separated by a semicolon.\n"
+        "  FIRST, exactly one of these words, naming what would settle the question "
+        "for {t} -- choose the single best fit, never two:\n"
+        "      COLLEAGUE    a named person on the team saying so, or agreeing\n"
+        "      CUSTOMER     a customer, grower or other outside party saying so\n"
+        "      MEASUREMENT  an instrument, count, statistic or reproducible test\n"
+        "      DOCUMENT     a written definition, guideline or spec being in place\n"
+        "  SECOND, one short sentence saying concretely what that evidence would be.\n"
+        "  Example form: \"MEASUREMENT; two labellers independently assign the same "
+        "class to the same 50 images.\"\n"
+        "  Example form: \"CUSTOMER; the grower accepts the delivered figures without "
+        "querying them.\"\n"
+        "  Pick on what {t} has actually been satisfied by in the record, not on what "
+        "would be most rigorous. It is NOT the commitment restated as an outcome.\n"
+    ),
+}
+
+
+def standard_rule(target, variant=None):
+    v = variant or "v1"
+    return STANDARD_PROMPTS.get(v, STANDARD_PROMPTS["v1"]).format(t=target)
+
+
+def valid_commitment(clause, max_words=COMMITMENT_MAX_WORDS, enabled=True):
+    """Is this clause an aim of the target's, rather than a move against someone?
+
+    Returns (ok, reason). The caller drops the candidate on a reason -- see the
+    note above on why dropping beats repairing.
+    """
+    if not enabled:
+        return True, ""
+    if not clause or not clause.strip():
+        return False, "empty"
+    c = " ".join(clause.strip().split())
+    c = c.strip("*").strip()
+    n = len(c.split())
+    if n > max_words:
+        return False, f"{n} words > {max_words}"
+    if _BAD_COMMITMENT_VERB.match(c):
+        return False, "directs an action at another character"
+    if _INTERROGATIVE.search(c):
+        return False, "phrased as a question"
+    return True, ""
+
+
+def accumulate_weights(lineage_ids, likelihood, accum, alpha=0.85, beta=1.0, eps_frac=0.12):
+    """One step of w_t proportional to w_{t-1}^alpha * L_t^beta, with a floor.
+
+    Pure arithmetic, no particle objects: `Tracer.accumulate` wraps it and
+    replay_likelihood.py calls it directly, so an offline sweep cannot drift
+    away from what production actually computes.
+
+    `accum` maps lineage_id -> previous normalized weight. A lineage not in it
+    starts at 1/n, uninformed. Returns the new weights, the unnormalized log
+    accumulators, and the updated map.
+    """
+    n = len(lineage_ids)
+    if n == 0:
+        return None
+    eps = float(eps_frac) / n
+
+    L = [float(x) for x in likelihood]
+    tot = sum(L)
+    L = [x / tot for x in L] if tot > 0 else [1.0 / n] * n
+
+    raw, prior = [], []
+    for lid, l in zip(lineage_ids, L):
+        w_prev = accum.get(lid)
+        if w_prev is None:
+            w_prev = 1.0 / n          # a new lineage starts uninformed
+        prior.append(w_prev)
+        # Unnormalized accumulated log-weight: the particle's OWN evidence
+        # trajectory. Reversals are counted on this and never on the
+        # normalized weights, which are coupled across particles.
+        raw.append(alpha * math.log(max(w_prev, 1e-12)) + beta * math.log(max(l, 1e-12)))
+
+    m = max(raw)
+    ex = [math.exp(r - m) for r in raw]
+    z = sum(ex) or 1.0
+    w = [x / z for x in ex]
+
+    floored = [max(x, eps) for x in w]
+    z2 = sum(floored) or 1.0
+    w_final = [x / z2 for x in floored]
+    # Flooring moves mass from high-weight particles to floored ones. This
+    # is logged, never asserted on -- only merge and split conserve exactly.
+    mass_moved = sum(abs(a - b) for a, b in zip(w, w_final)) / 2.0
+
+    return {'weights': w_final, 'raw_accumulator': raw, 'prior': prior,
+            'accum': {lid: x for lid, x in zip(lineage_ids, w_final)},
+            'mass_moved_by_floor': mass_moved, 'epsilon': eps,
+            'alpha': alpha, 'beta': beta}
+
+
+def parse_ranking(text: str, n: int):
+    """Parse the RANKING block into a 0-based permutation, best first.
+
+    Returns (order, parse_error), where order[r] is the 0-based hypothesis the
+    model placed at rank r+1. Tolerates "1st: 3", "1. 3", "**1st**: 3", "1) H3".
+
+    Refuses to guess unless the result is a full permutation. A partial ranking
+    is worse than none: it is used below to decide how the ALLOCATION block is
+    keyed, and a half-parsed order would silently mis-key every score.
+
+    The ALLOCATION block is cut off first. Its lines are "1: 95"-shaped and
+    would otherwise be read as rank-to-hypothesis pairs.
+    """
+    head = re.split(r"ALLOCATION|REASONING|EXPLANATION", text, flags=re.I)[0]
+    pairs = re.findall(
+        r"^\s*\**\s*(\d+)\s*(?:st|nd|rd|th)?\s*\**\s*[:.\)\-]\s*\**\s*(?:H|#)?\s*(\d+)",
+        head, flags=re.M | re.I)
+    ranks = {}
+    for pos, hyp in pairs:
+        p, h = int(pos), int(hyp)
+        if 1 <= p <= n and 1 <= h <= n and p not in ranks:
+            ranks[p] = h - 1
+    if len(ranks) != n:
+        return None, f"expected {n} ranks, parsed {len(ranks)}"
+    order = [ranks[p] for p in range(1, n + 1)]
+    if len(set(order)) != n:
+        return None, "ranking is not a permutation"
+    return order, None
+
+
+def order_agreement(scores, order):
+    """Fraction of ranked pairs a score vector agrees with, ties counting half.
+
+    1.0 means the scores reproduce the stated order exactly; 0.5 is chance.
+    Used to decide which of two readings of an ALLOCATION block the model meant.
+    """
+    n = len(order)
+    conc, tot = 0.0, 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = order[i], order[j]      # a was ranked better than b
+            tot += 1
+            if scores[a] > scores[b]:
+                conc += 1.0
+            elif scores[a] == scores[b]:
+                conc += 0.5
+    return conc / tot if tot else 0.0
+
+
+def map_allocation_to_hypotheses(alloc, order):
+    """Resolve an ALLOCATION block against the model's stated RANKING.
+
+    The rank-mode prompt asks for RANKING ("1st: <hypothesis>") and then
+    ALLOCATION ("1: <0-100>"). Following the ordinals, the model usually reads
+    the allocation keys as RANK POSITIONS -- so "1: 95" means "the hypothesis I
+    ranked first scores 95", not "hypothesis 1 scores 95". Measured over 2068
+    scored steps in musing_out, it used that convention on ~89% of them and the
+    hypothesis-keyed convention on the rest, with no marker distinguishing them.
+
+    Reading rank-keyed output as hypothesis-keyed hands the top likelihood to
+    whatever sits at index 0, every step, regardless of evidence.
+
+    So build both readings and keep whichever reproduces the stated ranking.
+    That is self-correcting: a rank-keyed reading of a non-monotone allocation
+    contradicts the ranking it came from, and a hypothesis-keyed reading of a
+    monotone one usually does too.
+
+    Returns (scores_in_hypothesis_order, keying, agreement).
+    """
+    n = len(alloc)
+    by_rank = [0.0] * n
+    for r, h in enumerate(order):
+        by_rank[h] = alloc[r]
+    by_hyp = list(alloc)
+
+    ag_rank = order_agreement(by_rank, order)
+    ag_hyp = order_agreement(by_hyp, order)
+
+    if by_rank == by_hyp:
+        return by_rank, 'rank', ag_rank
+    if ag_rank > ag_hyp:
+        return by_rank, 'rank', ag_rank
+    if ag_hyp > ag_rank:
+        return by_hyp, 'hypothesis', ag_hyp
+    # Equally consistent and genuinely different. Prefer the dominant
+    # convention, but say so, because the two disagree about the answer.
+    return by_rank, 'ambiguous', ag_rank
+
 
 def parse_allocation(text: str, n: int):
     """Parse a 100-point allocation block into n floats.
@@ -81,8 +407,16 @@ def parse_allocation(text: str, n: int):
     "**1**: 34" and a leading ALLOCATION header. Returns an error string rather
     than guessing when the count is wrong: a short list silently zip-truncated
     the population in the old code path.
+
+    The values come back keyed by whatever number the model wrote. In rank mode
+    that key may be a rank position rather than a hypothesis index -- see
+    map_allocation_to_hypotheses, which resolves it against the RANKING block.
     """
     head = re.split(r"REASONING|EXPLANATION", text, flags=re.I)[0]
+    # Drop the RANKING block when present: its "1st: 3" lines survive the loose
+    # fallback pattern below and would be parsed as allocations.
+    if re.search(r"ALLOCATION", head, flags=re.I):
+        head = re.split(r"ALLOCATION", head, flags=re.I)[-1]
     pairs = re.findall(r"^\s*\**\s*(?:H|#)?\s*(\d+)\s*\**\s*[:.\)\-]\s*\**\s*(-?\d+(?:\.\d+)?)",
                        head, flags=re.M)
     if not pairs:
@@ -127,7 +461,9 @@ class BaseTracer(ABC):
             self.base_model = load_model(args.model, **args.__dict__)
         tracer_name = args.tracing_model.replace("/", "-")
         base_name = args.model.replace("/", "-")
-        self.output_file = os.path.join(args.output_dir, f"tracer-{tracer_name}_model-{base_name}_runid-{args.run_id}_nhypotheses-{args.n_hypotheses}.jsonl")
+        self.output_file = os.path.join(
+            musing_layout.traces_dir(args.output_dir, create=True),
+            f"tracer-{tracer_name}_model-{base_name}_runid-{args.run_id}_nhypotheses-{args.n_hypotheses}.jsonl")
         self.trace_header = "Let's trace [target agent]'s thoughts step by step through the context.\n"
         self.args = args
         os.makedirs(args.output_dir, exist_ok=True)
@@ -136,6 +472,18 @@ class BaseTracer(ABC):
         self.run_logger = None
         self._accum = {}
         self._low_mass_run = 0
+        self._weak_run = {}
+        # Retired commitments, kept rather than discarded. Expiry was built to
+        # clear dead weight, and on a short span that is all it does. On a long
+        # one a topic goes quiet for a hundred turns and comes back, and the
+        # commitment that fitted it has been retired in the meantime -- so the
+        # filter has to re-invent it, and measurably does not: sz_Product held
+        # 'Predict harvest timing for labor projections' at G0 and no later
+        # generation ever proposed it again. Reviving is cheaper than minting
+        # (no generation call), and it preserves the root, so a commitment that
+        # comes back is the SAME hypothesis returning rather than a new one that
+        # happens to read alike.
+        self._retired = {}
 
     def accumulate(self, hypotheses, likelihood):
         """w_t proportional to w_{t-1}^alpha * L_t^beta, with a floor.
@@ -149,46 +497,93 @@ class BaseTracer(ABC):
         Keyed on lineage_id, not position: propagation mints a new particle_id
         every step, so a positional prior would attribute history to whichever
         particle happened to land at that index.
+
+        The arithmetic lives in the module-level `accumulate_weights` so that
+        offline replay (replay_likelihood.py) runs the SAME code as production
+        rather than a copy that can drift away from it.
         """
-        alpha = float(getattr(self.args, 'alpha', 0.85))
-        beta = float(getattr(self.args, 'beta', 1.0))
         n = len(hypotheses.hypotheses)
         if n == 0:
             return None
-        eps = float(getattr(self.args, 'eps_frac', 0.12)) / n
+        out = accumulate_weights(
+            [h.lineage_id for h in hypotheses.hypotheses], likelihood, self._accum,
+            alpha=float(getattr(self.args, 'alpha', 0.85)),
+            beta=float(getattr(self.args, 'beta', 1.0)),
+            eps_frac=float(getattr(self.args, 'eps_frac', 0.12)))
 
-        L = [float(x) for x in likelihood]
-        tot = sum(L)
-        L = [x / tot for x in L] if tot > 0 else [1.0 / n] * n
+        hypotheses.update_weights(np.array(out['weights'], dtype=float))
+        hypotheses.update_accumulators(out['raw_accumulator'])
+        self._accum = dict(out['accum'])
+        return {'mass_moved_by_floor': out['mass_moved_by_floor'], 'epsilon': out['epsilon'],
+                'alpha': out['alpha'], 'beta': out['beta'],
+                'prior': out['prior'], 'raw_accumulator': out['raw_accumulator']}
 
-        raw, prior = [], []
-        for h, l in zip(hypotheses.hypotheses, L):
-            w_prev = self._accum.get(h.lineage_id)
-            if w_prev is None:
-                w_prev = 1.0 / n          # a new lineage starts uninformed
-            prior.append(w_prev)
-            # Unnormalized accumulated log-weight: the particle's OWN evidence
-            # trajectory. Reversals are counted on this and never on the
-            # normalized weights, which are coupled across particles.
-            raw.append(alpha * math.log(max(w_prev, 1e-12)) + beta * math.log(max(l, 1e-12)))
+    def expire_weak(self, hypotheses, just_resampled=False):
+        """Retire a commitment that has held negligible mass for k informative steps.
 
-        m = max(raw)
-        ex = [math.exp(r - m) for r in raw]
-        z = sum(ex) or 1.0
-        w = [x / z for x in ex]
+        Resampling decides existence stochastically, and systematic resampling
+        guarantees a copy only at >= 1/n, so between resamples a hypothesis can
+        sit at the floor indefinitely -- measured at 32 consecutive turns at the
+        production divisor, where resampling fires ~0.4 times per run. That is a
+        slot spending three LLM calls a turn on a commitment the evidence
+        stopped supporting, and a slot a new commitment could hold.
 
-        floored = [max(x, eps) for x in w]
-        z2 = sum(floored) or 1.0
-        w_final = [x / z2 for x in floored]
-        # Flooring moves mass from high-weight particles to floored ones. This
-        # is logged, never asserted on -- only merge and split conserve exactly.
-        mass_moved = sum(abs(a - b) for a, b in zip(w, w_final)) / 2.0
+        TWO CORRECTIONS over the first implementation, both found by running it:
 
-        hypotheses.update_weights(np.array(w_final, dtype=float))
-        hypotheses.update_accumulators(raw)
-        self._accum = {h.lineage_id: x for h, x in zip(hypotheses.hypotheses, w_final)}
-        return {'mass_moved_by_floor': mass_moved, 'epsilon': eps,
-                'alpha': alpha, 'beta': beta, 'prior': prior, 'raw_accumulator': raw}
+        1. KEYED ON root_id, NOT lineage_id. Resample duplicates and perturbed
+           particles get fresh lineage ids, so a lineage-keyed counter was
+           destroyed by the very operators it needed to survive. root_id is
+           inherited through propagation and resampling, so it is the only
+           identity that persists. Mass is summed over the root's particles --
+           multiplicity is how a resample encodes strength, so a root duplicated
+           three times correctly reads as strong rather than as three weaklings.
+
+        2. RESAMPLE STEPS DO NOT COUNT. Resampling resets every weight to
+           exactly 1/n, which is above any sub-fair-share threshold, so every
+           counter cleared on contact -- measured 0 retirements with the counter
+           never exceeding 5 of a required 8, against a median inter-resample
+           gap of 7. Uniform weights carry no information about which hypothesis
+           is weak, so those steps are FROZEN: neither incremented nor reset.
+           Without this the rule cannot fire whenever k exceeds the gap, which
+           is the same "can never fire" class as the original split trigger.
+
+        Cost, measured rather than assumed: sub-threshold spells that later
+        recover run as long as 33 turns, so no (threshold, k) separates a dead
+        hypothesis from a reviving one. Accepted because the replacement MINTS A
+        NEW ROOT -- expiry is a source term, not just a remover.
+        """
+        n = len(hypotheses.hypotheses)
+        if n == 0:
+            return [], {}
+        frac = float(getattr(self.args, 'expiry_weight_frac', 0.5))
+        k = int(getattr(self.args, 'expiry_steps', 6))
+        thr = frac / n
+        mass, members = {}, {}
+        for j, h in enumerate(hypotheses.hypotheses):
+            mass[h.root_id] = mass.get(h.root_id, 0.0) + float(hypotheses.weights[j])
+            members.setdefault(h.root_id, []).append(j)
+        n_below = sum(1 for r, m in mass.items() if m < thr)
+        if not just_resampled:
+            for r, m in mass.items():
+                self._weak_run[r] = (self._weak_run.get(r, 0) + 1) if m < thr else 0
+            for r in [x for x in self._weak_run if x not in mass]:
+                del self._weak_run[r]
+        dead_roots = [r for r in mass if self._weak_run.get(r, 0) >= k]
+        # retire the particles of expired roots, lightest first; never more than
+        # half the population at once -- expiry introduces alternatives, it does
+        # not restart the filter.
+        weak = [j for r in dead_roots for j in members[r]]
+        weak = sorted(weak, key=lambda j: float(hypotheses.weights[j]))[:max(0, n // 2)]
+        # Keep what is being retired. Peak weight, not the dying weight: a
+        # commitment that once led and then faded is a far better revival
+        # candidate than one that never got off the floor.
+        for j in weak:
+            self.retire(hypotheses.hypotheses[j], hypotheses.weights[j])
+        return weak, {'expiry_threshold': thr, 'expiry_steps': k,
+                      'expiry_weight_condition': n_below,
+                      'expiry_duration_condition': len(weak),
+                      'expiry_frozen': bool(just_resampled),
+                      'max_weak_run': max(self._weak_run.values()) if self._weak_run else 0}
 
     def enforce_population_cap(self, hypotheses):
         """Cap at 1.5*N, dropping the lightest particles.
@@ -235,7 +630,7 @@ class BaseTracer(ABC):
         self.run_logger = run_logger
         return run_logger
 
-    def _log_step(self, idx, hypotheses, weight_results, operators, likelihood_ess=None, ess_value=None, likelihood_ess_norm=None, accum_info=None, state_action=None, pre_snapshot=None, perturb_info=None, perturb_conditions=None, cap_info=None, split_info=None):
+    def _log_step(self, idx, hypotheses, weight_results, operators, likelihood_ess=None, ess_value=None, likelihood_ess_norm=None, accum_info=None, state_action=None, pre_snapshot=None, perturb_info=None, perturb_conditions=None, cap_info=None, split_info=None, expiry_info=None):
         """Emit one StepRecord. Instrumentation only -- never alters the filter."""
         if self.run_logger is None:
             trace_log.RECORDER.drain()
@@ -262,10 +657,12 @@ class BaseTracer(ABC):
                 resample_duplicate=getattr(h, 'resample_duplicate', False),
                 text=texts[i] if i < len(texts) else '',
                 anchor=h.anchor,
+                standard=getattr(h, 'standard', None),
                 weight=weights[i] if i < len(weights) else 0.0,
                 raw_accumulator=h.raw_accumulator,
                 likelihood=likes[i] if likes and i < len(likes) else None,
                 likelihood_rank=ranks.get(i),
+                anchor_revisions=getattr(h, 'anchor_revisions', 0),
             ))
         rec = StepRecord(step_idx=idx, particles=particles)
         rec.weights_post = weights
@@ -279,7 +676,18 @@ class BaseTracer(ABC):
         if weight_results is not None:
             prompts = weight_results.get('prompts') or []
             rec.likelihood_prompt = prompts[0] if prompts else None
+            rec.likelihood_system_prompt = weight_results.get('system_prompt')
             rec.scored_texts = list(texts)
+            rec.surprise = weight_results.get('surprise')
+            rec.off_topic = weight_results.get('off_topic')
+            rec.routine_score = weight_results.get('routine_score')
+            rec.baseline_score = weight_results.get('baseline_score')
+            rec.baseline_rank = weight_results.get('baseline_rank')
+            rec.best_margin = weight_results.get('best_margin')
+            rec.ranking = weight_results.get('ranking')
+            rec.alloc_keying = weight_results.get('alloc_keying')
+            rec.rank_alloc_agreement = weight_results.get('rank_alloc_agreement')
+            rec.allocation_raw = weight_results.get('allocation_raw')
         # ESS of the particles actually listed below (post-operator), so the
         # record is internally consistent. The pre-operator value that drove the
         # resample decision is kept separately.
@@ -298,6 +706,15 @@ class BaseTracer(ABC):
             rec.within_root_divergence = round(sum(divs) / len(divs), 4)
         else:
             rec.within_root_divergence = None   # undefined, never 0.0
+        if expiry_info:
+            rec.expiry_threshold = round(float(expiry_info['expiry_threshold']), 5)
+            rec.expiry_steps = int(expiry_info['expiry_steps'])
+            # logged separately so a zero-expiry run is attributable: weight
+            # never low, versus low but never for long enough.
+            rec.expiry_weight_condition = int(expiry_info['expiry_weight_condition'])
+            rec.expiry_duration_condition = int(expiry_info['expiry_duration_condition'])
+            rec.max_weak_run = int(expiry_info['max_weak_run'])
+            rec.expiry_frozen = bool(expiry_info['expiry_frozen'])
         if cap_info is not None:
             rec.population_cap, rec.cap_bound = int(cap_info[0]), bool(cap_info[1])
         else:
@@ -351,6 +768,13 @@ class BaseTracer(ABC):
         if split_info:
             rec.split_weight_condition = split_info.get('weight_condition')
             rec.split_disagree_condition = split_info.get('rank_condition')
+            # these existed in `info` but were never persisted, so every split
+            # step read split_children=None / merged=None on disk
+            rec.split_children = split_info.get('children')
+            rec.split_net = split_info.get('split_net')
+            rec.expanded = split_info.get('expanded')
+            rec.merged_count = split_info.get('merged')
+            rec.net_new_roots = split_info.get('net_new_roots')
             for col in (split_info.get('anchor_collapse') or []):
                 rec.anchor_collapses.append(col)
         sc, wc, dc = trace_log.split_candidates(rec.particles)
@@ -675,6 +1099,49 @@ class Tracer(BaseTracer):
         self.input_context = preprocessed_text['context']
         self.target_agent = preprocessed_text['target_agent']
         self.trace_header = self.trace_base_header.replace("[target agent]", self.target_agent)
+        self._role_prior = None
+
+    def infer_role_prior(self):
+        """One call: what seat is this person sitting in, and what does that seat want?
+
+        Every hypothesis source in this filter reads the transcript and reports what it
+        says. That works when the motive is spoken -- ATLA characters announce theirs --
+        and fails when it is not: on a Slack thread the honest summary of what someone's
+        messages DO is "define numerical thresholds", which is a description of the
+        message, not a reason for sending it.
+
+        A prior is the missing half. It is derived ONCE from the whole transcript rather
+        than per step, and it names the person's stake, not their utterances -- so the
+        proposer has somewhere to generate FROM other than the words in front of it.
+        Whole-transcript on purpose: goal-seeding sees only the opening scene, which is
+        why nothing ever proposed forgiveness on the ATLA episode.
+        """
+        if self._role_prior is not None:
+            return self._role_prior
+        ctx = (self.input_context or "")[:24000]
+        sys_p = (
+            f"You identify what position someone occupies and what that position gives them "
+            f"a stake in.\n\n"
+            f"Answer in exactly this form:\n"
+            f"SEAT: <who {self.target_agent} is here and who they answer to, one clause>\n"
+            f"STAKE: <what someone in that seat is trying to bring about, one clause>\n"
+            f"PRESSURE: <what would count as a bad outcome for them, one clause>\n\n"
+            f"Rules:\n"
+            f"- Describe the POSITION, not the messages. Do not summarise what they said.\n"
+            f"- Do not name the specific document, feature, number or object under discussion.\n"
+            f"- If their role is not stated anywhere, infer it from who defers to whom, who "
+            f"is relaying someone else's requirements, and who is defending a decision.")
+        try:
+            raw = self.tracer_model.interact(
+                f"<transcript>\n{ctx}\n</transcript>\n\nWho is {self.target_agent} here?",
+                system_prompt=sys_p, temperature=0, max_tokens=512, stage='role_prior')
+        except Exception:
+            raw = ""
+        self._role_prior = " ".join((raw or "").split()).strip()
+        if self._role_prior:
+            print(Panel(self._role_prior[:400], title=f"Role prior — {self.target_agent}",
+                        style="cyan", box=box.SIMPLE_HEAD))
+        return self._role_prior
 
     def get_perception_tracking_prompts(self, state_action: dict, context_history: List[dict] = None, target_agent: str = None) -> List[str]:
         target_agent = self.target_agent if target_agent is None else target_agent
@@ -825,6 +1292,17 @@ class Tracer(BaseTracer):
                         f"the same hypothesis. Make the goals mutually exclusive where possible.")
             else:
                 axis = ""
+            # Seeding sees only the opening scene, so on a long trajectory the whole
+            # commitment vocabulary is fixed by scene 0 -- which is why nothing ever
+            # proposed forgiveness on the ATLA episode. The role prior is derived from
+            # the WHOLE record, so it widens the seed without showing step 0 the future.
+            if getattr(self.args, 'infer_motive', False):
+                rp = self.infer_role_prior()
+                if rp:
+                    axis = (f"{axis} What is known about {self.target_agent}'s position from the "
+                            f"whole record: {rp} Let the hypotheses follow from that SEAT and "
+                            f"STAKE. State the reason the action is worth taking, never a "
+                            f"description of what the action accomplishes. ")
             if action:
                 belief_query = f"{context_input.strip()}{self.assumption}\n\nGenerate a numbered list of {n_hypotheses_str} hypotheses on what were {self.target_agent}'s thoughts (e.g., beliefs, intent) that led to the action above. {axis}Do not add any additional comments."
             else:
@@ -849,6 +1327,10 @@ class Tracer(BaseTracer):
         if want_extract and len(hypotheses_list) > 1:
             anchors = self.extract_anchors(hypotheses_list, self.target_agent)
         initial_hypotheses = HypothesesSetV3(target_agent=self.target_agent, contexts=[state_action], perceptions=[perceptions], texts=hypotheses_list, weights=weights, anchors=anchors)
+        # extract_anchors parks the per-anchor standards on the tracer because
+        # it returns a bare list; attach them to the founding particles here.
+        for h, sd in zip(initial_hypotheses.hypotheses, getattr(self, '_last_standards', []) or []):
+            h.update_standard(sd)
 
         return initial_hypotheses
 
@@ -876,7 +1358,35 @@ class Tracer(BaseTracer):
             if c['state'] or c['action']:
                 context_and_perception += f"<context {idx + 1}>\n"
                 if c['state']:
-                    context_and_perception += f"<state>{p['state']}</state>\n\n" # only include the perception for inhibitory control
+                    # Content AND the perception note, matching setup_propagation
+                    # (which has always done it this way for the CURRENT step).
+                    #
+                    # This used to write p['state'] -- the perception SUMMARY --
+                    # in place of c['state'], the thing that was actually said.
+                    # A perception summary reads "Product perceived the context"
+                    # and carries no content, so a target's history held its own
+                    # utterances in full and nothing but stubs for everyone
+                    # else's. Every belief about another party therefore had to
+                    # come from the single current state, which is why beliefs
+                    # read as commentary on the latest message.
+                    #
+                    # Measured consequence: at sz_Product step 2, where Burdett
+                    # denies the customer's spec, the whole November negotiation
+                    # was absent and the only visible other-party content was
+                    # Rodriguez's question -- so 0.823 of Product's mass asserted
+                    # the CUSTOMER's spec, and the pair of traces testified that
+                    # the two sides agreed at the exact moment they discovered
+                    # they did not.
+                    #
+                    # Perception still bounds what the target can know: it rides
+                    # as a <note>, the same mechanism that carries the false-belief
+                    # result (FINDINGS.md: perception-tracking bounds what a
+                    # target can know), rather than by deleting the record.
+                    context_and_perception += f"<state>{c['state']}</state>\n"
+                    if p.get('state'):
+                        context_and_perception += f"<note>{p['state']}</note>\n\n"
+                    else:
+                        context_and_perception += "\n"
                 if c['action']:
                     if self.args.input_is_chat:
                         context_and_perception += f"<response>\n{c['action']}\n</response>\n"
@@ -1037,9 +1547,6 @@ class Tracer(BaseTracer):
         return results
 
 
-
-
-
     def split_and_merge(self, hypotheses, context_and_perception_str=None):
         """PHASE 4: split (source) then merge (sink), in the SAME step.
 
@@ -1059,7 +1566,8 @@ class Tracer(BaseTracer):
         ancestral-mass reversals correct.
         """
         trace_log.set_stage('split')
-        info = {'split_fired': 0, 'children': 0, 'merged': 0, 'anchor_collapse': []}
+        info = {'split_fired': 0, 'children': 0, 'merged': 0, 'anchor_collapse': [],
+                'expanded': 0, 'split_net': 0, 'net_new_roots': 0}
         n_children = int(getattr(self.args, 'split_children', 2))
         wq = float(getattr(self.args, 'split_weight_quantile', 0.20))
 
@@ -1084,8 +1592,23 @@ class Tracer(BaseTracer):
             f"and not a different commitment altogether. They must be incompatible with each "
             f"other: {target} can hold at most one.\n\n"
             f"Avoid duplicating any commitment already in play:\n{exclude}\n\n"
+            # The frame above ("what {target} wants") was always right; nothing
+            # enforced it, so the model answered with the next conversational
+            # move instead of an aim. State the form as a rule, the way the
+            # rank scorer states its rules.
+            f"A COMMITMENT is what {target} is trying to achieve, stated as {target}'s own aim.\n"
+            f"- NEVER a question, and never phrased as one.\n"
+            f"- NEVER a request, instruction or challenge directed at another character. "
+            f"\"Ask X to ...\", \"Tell X ...\", \"Get X to ...\" are all wrong.\n"
+            f"- NEVER a description of what {target} says or does. Name the END, not the move.\n"
+            f"- At most {COMMITMENT_MAX_WORDS} words. Plain verb phrase, e.g. "
+            f"\"Avenge her mother\", \"Earn Katara's trust\".\n\n"
+            + standard_rule(target, getattr(self.args, 'standard_prompt', None)) +
+            f"Children may share an aim and be genuinely exclusive because their "
+            f"standards differ.\n\n"
             f"Answer exactly:\n" +
-            "\n".join(f"{k+1}. COMMITMENT: <clause> | BELIEF: <one sentence>"
+            "\n".join(f"{k+1}. COMMITMENT: <clause> | BELIEF: <one sentence> "
+                       f"| STANDARD: <what would settle it for them>"
                        for k in range(n_children)))
         prompts = [f"<parent commitment>\n{hypotheses.hypotheses[i].anchor}\n</parent commitment>\n\n"
                    f"<parent account>\n{hypotheses.hypotheses[i].text}\n</parent account>"
@@ -1099,21 +1622,43 @@ class Tracer(BaseTracer):
         accs = list(hypotheses.accumulators)
         parents = list(hypotheses.hypotheses)
         new_anchor_for = {}
+        new_standard_for = {}
+        # indices produced by each splitting parent, so the NET outcome can be
+        # classified after merge has had its turn on the same step.
+        split_groups = {}
 
         for i, raw in zip(idxs, raws):
-            pairs = re.findall(r"COMMITMENT\s*:\s*(.+?)\s*\|\s*BELIEF\s*:\s*(.+)", raw, re.I)
-            pairs = [(c.strip(), b.strip()) for c, b in pairs][:n_children]
+            pairs = [(m.group(1).strip(), m.group(2).strip(), (m.group(3) or "").strip())
+                     for m in re.finditer(
+                         r"COMMITMENT\s*:\s*(.+?)\s*\|\s*BELIEF\s*:\s*(.+?)"
+                         r"(?:\s*\|\s*STANDARD\s*:\s*(.+?))?\s*$", raw, re.I | re.M)][:n_children]
+            # Drop children whose commitment is not an aim. A rejected child
+            # costs one split; an accepted bad one founds a root and persists.
+            kept = []
+            for c, b, sd in pairs:
+                ok, why = valid_commitment(c, enabled=not getattr(self.args,'legacy_form',False))
+                if ok:
+                    kept.append((c, b, sd))
+                else:
+                    info.setdefault('rejected_commitments', []).append({'clause': c, 'reason': why})
+            pairs = kept
             if len(pairs) < 2:
+                # Splitting into one child is an expand, not a split, and a
+                # parent that only yields rejects should not be touched at all.
                 continue
             share = weights[i] / len(pairs)
             acc_par = accs[i] if accs[i] is not None else 0.0
             acc_child = acc_par - math.log(len(pairs))     # SPLIT, not copied
             texts[i], weights[i], accs[i] = pairs[0][1], share, acc_child
             new_anchor_for[i] = pairs[0][0]
-            for c, b in pairs[1:]:
+            new_standard_for[i] = pairs[0][2]
+            for c, b, sd in pairs[1:]:
                 texts.append(b); weights.append(share); anchors.append(c)
                 accs.append(acc_child); parents.append(hypotheses.hypotheses[i])
                 new_anchor_for[len(texts) - 1] = c
+                new_standard_for[len(texts) - 1] = sd
+            split_groups[hypotheses.hypotheses[i].particle_id] = (
+                [i] + list(range(len(texts) - (len(pairs) - 1), len(texts))))
             info['split_fired'] += 1
             info['children'] += len(pairs)
 
@@ -1130,12 +1675,40 @@ class Tracer(BaseTracer):
         for k in new_anchor_for:
             if k < len(out.hypotheses):
                 out.hypotheses[k].split_child = True
+                # update_anchors() founds the root; the standard is set after,
+                # so a child does not inherit the parent's settling condition
+                # for a commitment it no longer holds.
+                out.hypotheses[k].update_standard(new_standard_for.get(k))
                 out.hypotheses[k].note_operator('split')
+
+        group_roots = {pid: {out.hypotheses[k].root_id for k in grp
+                             if k < len(out.hypotheses)}
+                       for pid, grp in split_groups.items()}
 
         # MERGE, immediately, same step -- the sink for split's output
         out, merged, collapses = self.merge_similar(out)
         info['merged'] = merged
         info['anchor_collapse'] = collapses
+
+        # SPLIT vs EXPAND, decided by what SURVIVED the merge.
+        # A split is a PARTITION: the parent's hypothesis space divided into
+        # alternatives that cannot both hold. If merge absorbs all but one
+        # child, the parent was not partitioned -- it was narrowed, which is a
+        # different alteration and must not be counted as a source of
+        # diversity. Measured before this distinction existed: split+merge
+        # netted -0.59 roots per firing across 22 firings, never once positive,
+        # because merge ate the children on the step that made them.
+        live = {h.root_id for h in out.hypotheses}
+        for pid, roots in group_roots.items():
+            surviving = roots & live
+            if len(surviving) == 1:
+                info['expanded'] += 1
+                for h in out.hypotheses:
+                    if h.root_id in surviving:
+                        h.note_operator('expand')
+            elif len(surviving) >= 2:
+                info['split_net'] += 1
+        info['net_new_roots'] = len(live - {h.root_id for h in hypotheses.hypotheses})
         return out, info
 
     def merge_similar(self, hypotheses):
@@ -1169,6 +1742,8 @@ class Tracer(BaseTracer):
         if not absorbed:
             return hypotheses, 0, []
         keep_idx = [i for i in range(n) if i not in absorbed]
+        for i in absorbed:                      # absorbed commitments leave the population
+            self.retire(hyps[i], hypotheses.weights[i])
         w = []
         for i in keep_idx:
             extra = sum(float(hypotheses.weights[j]) for j in absorbed
@@ -1186,7 +1761,98 @@ class Tracer(BaseTracer):
             dst.note_operator('merge')
         return out, len(absorbed), collapses
 
-    def perturb_anchored(self, hypotheses, idxs, context_and_perception_str=None):
+    def retire(self, h, weight=0.0):
+        """Remember a commitment that is leaving the population.
+
+        Called from every path a hypothesis can exit by, not just expiry. That
+        distinction is the whole feature: on v6_bb_Rodriguez expiry fired on
+        1 step of 80 while merge fired on 19, split on 16 and perturb on 13, so
+        a cache fed only by expiry stayed ~2% populated and revival never had
+        anything to offer. Turnover happens through merge and replacement.
+
+        Keyed by anchor, holding PEAK weight -- a commitment that once led and
+        faded is a better revival candidate than one that never left the floor.
+
+        Defensive about the attribute because several call sites build a Tracer
+        without running the full __init__ (test_expiry.py among them).
+        """
+        if not hasattr(self, '_retired'):
+            self._retired = {}
+        if not getattr(h, 'anchor', None):
+            return
+        prev = self._retired.get(h.anchor, {})
+        self._retired[h.anchor] = {
+            'anchor': h.anchor, 'text': getattr(h, 'text', ''), 'root_id': getattr(h, 'root_id', None),
+            'peak': max(float(prev.get('peak', 0.0)), float(weight or 0.0)),
+            'revivals': int(prev.get('revivals', 0)),
+        }
+        # Bounded: the pool is scored on revival, so an unbounded one would grow
+        # the prompt without bound. Keep the strongest.
+        cap = int(getattr(self.args, 'retired_cap', 40))
+        if len(self._retired) > cap:
+            for a in sorted(self._retired, key=lambda x: self._retired[x]['peak'])[:len(self._retired) - cap]:
+                del self._retired[a]
+
+    def revive_retired(self, current_action, live_anchors, k=1, ctx=""):
+        """Bring a retired commitment back, if it explains what just happened.
+
+        Reviving is gated on the same absolute-fit test as minting: the retired
+        candidates are ranked against a null, and one only returns if it beats
+        "no particular commitment". Without that gate this would be an
+        oscillator -- expiry retires the weak, revival restores them, forever.
+
+        Cheaper than minting (one ranking call, no generation) and it returns the
+        SAME root, so a commitment that goes quiet and comes back reads as one
+        hypothesis with a gap rather than two that happen to agree.
+        """
+        if not hasattr(self, '_retired'):
+            self._retired = {}
+        pool = [v for a, v in self._retired.items() if a not in set(live_anchors or [])]
+        if not pool or not current_action:
+            return []
+        pool.sort(key=lambda v: -float(v.get('peak', 0.0)))
+        pool = pool[:8]
+        n = len(pool)
+        slate = [v['anchor'] for v in pool] + [
+            f"{self.target_agent} has no particular commitment here beyond responding to "
+            f"the immediate situation."]
+        block = "\n".join(f"{i+1}. {t}" for i, t in enumerate(slate))
+        sys_p = (
+            f"You judge which standing commitments, if any, would have PREDICTED the action "
+            f"{self.target_agent} just took.\n\n"
+            f"Rank all {n+1} from BEST to WORST predictor of that action, then score each 0-100.\n"
+            f"Item {n+1} is the null: it wins when none of the others explains the action.\n\n"
+            f"Answer in exactly this format:\n"
+            f"RANKING\n1st: <number>\n...\n{n+1}th: <number>\n\n"
+            f"ALLOCATION\n1: <0-100>\n...\n{n+1}: <0-100>\n\nREASONING\n<one sentence>")
+        prompt = (f"<previous context>\n{(ctx or '')[-6000:]}\n</previous context>\n\n"
+                  f"<previously held commitments>\n{block}\n</previously held commitments>\n\n"
+                  f"<observed action>\n{current_action}\n</observed action>")
+        raw = self.tracer_model.interact(prompt, system_prompt=sys_p, temperature=0,
+                                         max_tokens=1024, stage='revive')
+        alloc, err = parse_allocation(raw, n + 1)
+        if alloc is None:
+            return []
+        order, _ = parse_ranking(raw, n + 1)
+        scores = map_allocation_to_hypotheses(alloc, order)[0] if order else alloc
+        baseline = float(scores[n])
+        winners = [(float(scores[i]) - baseline, pool[i]) for i in range(n)
+                   if float(scores[i]) > baseline]
+        winners.sort(key=lambda t: -t[0])
+        out = []
+        for margin, v in winners[:k]:
+            v = dict(v)
+            v['margin'] = margin
+            out.append(v)
+            self._retired.pop(v['anchor'], None)
+        if out:
+            print(Panel("\n".join(f"{v['anchor']}  (peak {v['peak']:.2f}, margin +{v['margin']:.0f})"
+                                  for v in out),
+                        title="Revived from cache", style="green", box=box.SIMPLE_HEAD))
+        return out
+
+    def perturb_anchored(self, hypotheses, idxs, context_and_perception_str=None,
+                         surprising_action=None):
         """PHASE 3e: replace a particle's commitment with a genuinely different one.
 
         The ONLY source term in the system. Roots are founded at initialization
@@ -1210,9 +1876,33 @@ class Tracer(BaseTracer):
         # Conflating them would corrupt the acceptance rate, which is the metric
         # that tells us whether the gate is testing anything -- the same class of
         # bug as parse failure aliasing onto bucket 'f'.
-        results = {'accepted': [], 'rejected': [], 'unparsed': [], 'proposed': {}}
+        results = {'accepted': [], 'rejected': [], 'unparsed': [], 'proposed': {}, 'revived': []}
         if not idxs:
             return results
+
+        # REVIVE BEFORE MINTING. If a commitment this trace already held would
+        # have predicted the action, bringing it back beats inventing a new one:
+        # it is one ranking call instead of a generation plus a coherence gate,
+        # and it restores the original root so the hypothesis reads as having
+        # gone quiet rather than as a fresh idea that happens to match.
+        if getattr(self.args, 'revive_retired', False) and surprising_action:
+            live = [h.anchor for h in hypotheses.hypotheses if h.anchor]
+            for v in self.revive_retired(surprising_action, live, k=max(1, len(idxs) // 2),
+                                         ctx=context_and_perception_str or ""):
+                if not idxs:
+                    break
+                i = idxs.pop(0)
+                h = hypotheses.hypotheses[i]
+                h.update_text(v.get('text') or h.text)
+                h.update_anchor(v['anchor'], revision=True)
+                if v.get('root_id'):
+                    h.root_id = v['root_id']      # the SAME hypothesis returning
+                h.note_operator('revive')
+                results['revived'].append({'index': i, 'anchor': v['anchor'],
+                                           'peak': v.get('peak'), 'margin': v.get('margin')})
+                results['accepted'].append(i)
+            if not idxs:
+                return results
 
         exclude = "\n".join(f"- {a}" for a in dict.fromkeys(live)) or "- (none recorded)"
         k = len(idxs)
@@ -1223,42 +1913,112 @@ class Tracer(BaseTracer):
         # distinct ideas. Each call avoided the commitments already in play but
         # could not see its siblings. Split gets this right by generating its
         # children together; perturbation now does the same.
+        # ABDUCTIVE FRAME. "What does X want?" is answerable from the surface -- the
+        # honest summary of a work thread is "define numerical thresholds", which
+        # describes the message rather than a reason to send it. Asking what would have
+        # to be TRUE for these messages to be worth sending forces a latent cause, and
+        # the role prior gives the proposer somewhere to generate from other than the
+        # words in front of it.
+        use_prior = getattr(self.args, 'infer_motive', False)
+        prior_block = ""
+        if use_prior:
+            rp = self.infer_role_prior()
+            if rp:
+                prior_block = (f"\n\nWhat is known about {target_agent}'s position, established "
+                               f"from the whole record:\n{rp}\n"
+                               f"Use this as your starting point. A commitment should follow from "
+                               f"this SEAT and STAKE, not from the wording of any one message.")
+        ask = (f"What would have to be TRUE about {target_agent} for the things they have said "
+               f"and done here to be worth saying and doing? Propose {k} different answers."
+               if use_prior else
+               f"Given the observations {target_agent} has had, propose {k} different standing "
+               f"commitments -- different things they are trying to achieve -- each still "
+               f"consistent with everything they have observed.")
         sys_p = (
             f"You propose {k} ALTERNATIVE accounts of what {target_agent} wants.\n\n"
-            f"Given the observations {target_agent} has had, propose {k} different standing "
-            f"commitments -- different things they are trying to achieve -- each still "
-            f"consistent with everything they have observed.\n\n"
+            f"{ask}{prior_block}\n\n"
             f"Rules:\n"
             f"- The {k} new commitments must be MUTUALLY EXCLUSIVE WITH EACH OTHER. "
             f"{target_agent} can hold at most one. Rewording the same goal is not a "
             f"different goal.\n"
             f"- They must also differ from every commitment already in play:\n{exclude}\n"
             f"- None may contradict anything {target_agent} demonstrably observed.\n"
-            f"- Change what they WANT, not the wording of what they believe.\n\n"
+            f"- Change what they WANT, not the wording of what they believe.\n"
+            + (f"- A commitment is the REASON the messages are worth sending, not a description "
+               f"of what they accomplish. Do NOT name the specific document, feature, number, "
+               f"metric or object under discussion -- if your clause could only make sense in "
+               f"this one thread, it is a restatement, not a motive.\n" if use_prior else "")
+            +
+            # Same form rule as split. Perturbation is the only source term, so
+            # a malformed commitment here founds a root that nothing removes.
+            f"- A COMMITMENT is what {target_agent} is trying to achieve, stated as "
+            f"{target_agent}'s own aim. NEVER a question. NEVER a request or instruction "
+            f"aimed at another character (\"Ask X to ...\", \"Tell X ...\"). NEVER a "
+            f"description of what {target_agent} says or does -- name the END, not the move. "
+            f"At most {COMMITMENT_MAX_WORDS} words.\n\n"
+            # WHY A THIRD FIELD. Every other rule here asks what the target
+            # WANTS. Two people can want the same thing and still disagree
+            # about what would show they had got it, and that disagreement has
+            # nowhere to go in a wants-only representation -- the proposer
+            # rounds it to the nearest motive, and the nearest motive to a
+            # senior person pressing a point is status. Measured: on the
+            # Bloomfield purple dispute the filter built "Establish their
+            # authority" 0.27 -> 0.67 out of four consecutive QUESTIONS,
+            # because the real difference (a count is right when it matches
+            # what we deliver / when two labellers reproduce it) is a
+            # criterion, not a desire.
+            + standard_rule(target_agent, getattr(self.args, 'standard_prompt', None)) +
+            f"\n"
             f"Answer exactly {k} numbered lines:\n" +
-            "\n".join(f"{j+1}. COMMITMENT: <short clause> | BELIEF: <one or two sentences>"
+            "\n".join(f"{j+1}. COMMITMENT: <short clause> | BELIEF: <one or two sentences> "
+                       f"| STANDARD: <what would settle it for them>"
                        for j in range(k)))
         ctx = context_and_perception_str or ""
         block = "\n".join(
             f"{j+1}. currently: {hypotheses.hypotheses[i].anchor}"
             for j, i in enumerate(idxs))
-        prompt = (f"<previous context>\n{ctx}\n</previous context>\n\n"
+        # On the surprise path the whole point is the action nothing explained,
+        # and it is NOT in ctx (which stops at the previous step). Showing it and
+        # naming the job is what turns a generic diversity repair into a targeted
+        # one: the commitment being asked for is the one that would have
+        # predicted THIS.
+        action_block = ""
+        if surprising_action:
+            action_block = (
+                f"\n\n<the action none of the current accounts explains>\n{surprising_action}\n"
+                f"</the action none of the current accounts explains>\n\n"
+                f"At least one of your {k} proposals must be a commitment that WOULD have "
+                f"predicted that action. It may contradict the accounts listed above -- "
+                f"{target_agent} may have changed what they want.")
+        prompt = (f"<previous context>\n{ctx}\n</previous context>{action_block}\n\n"
                   f"<the {k} accounts to replace>\n{block}\n</the {k} accounts to replace>")
         raw_one = self.tracer_model.interact(
             prompt, system_prompt=sys_p, temperature=0.7, max_tokens=2048, stage='perturb')
-        found = re.findall(r"COMMITMENT\s*:\s*(.+?)\s*\|\s*BELIEF\s*:\s*(.+)", raw_one, re.I)
+        # STANDARD is optional in the pattern so a model that omits it still
+        # yields a usable commitment rather than an unparsed slot.
+        found = [(m.group(1), m.group(2), (m.group(3) or "").strip())
+                 for m in re.finditer(
+                     r"COMMITMENT\s*:\s*(.+?)\s*\|\s*BELIEF\s*:\s*(.+?)"
+                     r"(?:\s*\|\s*STANDARD\s*:\s*(.+?))?\s*$", raw_one, re.I | re.M)]
         # drop any that duplicate an earlier one in this same batch
         uniq, seen_c = [], set()
-        for c, b in found:
+        for c, b, sd in found:
             key = c.strip().lower().rstrip('.')
+            ok, why = valid_commitment(c, enabled=not getattr(self.args,'legacy_form',False))
+            if not ok:
+                results.setdefault('rejected_commitments', []).append(
+                    {'clause': c.strip(), 'reason': why})
+                continue
             if key and key not in seen_c:
                 seen_c.add(key)
-                uniq.append((c.strip(), b.strip()))
+                uniq.append((c.strip(), b.strip(), sd))
         results['proposed_raw'] = len(found)
         results['proposed_unique'] = len(uniq)
+        results['proposed_with_standard'] = sum(1 for _, _, sd in uniq if sd)
         raws = [None] * len(idxs)
         for j in range(min(len(uniq), len(idxs))):
-            raws[j] = f"COMMITMENT: {uniq[j][0]}\nBELIEF: {uniq[j][1]}"
+            raws[j] = (f"COMMITMENT: {uniq[j][0]}\nBELIEF: {uniq[j][1]}"
+                       + (f"\nSTANDARD: {uniq[j][2]}" if uniq[j][2] else ""))
 
         cands = []
         for i, r in zip(idxs, raws):
@@ -1269,11 +2029,13 @@ class Tracer(BaseTracer):
                 results['unparsed'].append(i)
                 continue
             m_c = re.search(r"COMMITMENT\s*:\s*(.+)", r, re.I)
-            m_b = re.search(r"BELIEF\s*:\s*(.+)", r, re.I | re.S)
+            m_b = re.search(r"BELIEF\s*:\s*(.+?)(?=\nSTANDARD\s*:|$)", r, re.I | re.S)
+            m_s = re.search(r"STANDARD\s*:\s*(.+)", r, re.I | re.S)
             if not m_c or not m_b:
                 results['unparsed'].append(i)
                 continue
-            cands.append((i, m_c.group(1).strip(), m_b.group(1).strip()))
+            cands.append((i, m_c.group(1).strip(), m_b.group(1).strip(),
+                          m_s.group(1).strip() if m_s else None))
         if not cands:
             return results
 
@@ -1284,7 +2046,9 @@ class Tracer(BaseTracer):
             f"Reject ONLY for contradiction with the observed record. Do NOT reject an account "
             f"for being surprising, unlikely, or unflattering -- a genuinely different account "
             f"is the point.\n\nAnswer one line each:\n1: COHERENT or CONTRADICTS\n...")
-        block = "\n".join(f"{n+1}. COMMITMENT: {c} | BELIEF: {b}" for n, (_, c, b) in enumerate(cands))
+        block = "\n".join(f"{n+1}. COMMITMENT: {c} | BELIEF: {b}"
+                          + (f" | STANDARD: {sd}" if sd else "")
+                          for n, (_, c, b, sd) in enumerate(cands))
         gate_raw = self.tracer_model.interact(
             f"<observed record>\n{ctx}\n</observed record>\n\n<proposed accounts>\n{block}\n"
             f"</proposed accounts>", system_prompt=gate_sys, temperature=0,
@@ -1294,7 +2058,7 @@ class Tracer(BaseTracer):
         vmap = {int(n): v.upper() for n, v in verdicts}
         results['gate_unparsed'] = sum(1 for n in range(1, len(cands) + 1) if n not in vmap)
 
-        for pos, (i, commitment, belief) in enumerate(cands, start=1):
+        for pos, (i, commitment, belief, standard) in enumerate(cands, start=1):
             results['proposed'][i] = commitment
             verdict = vmap.get(pos)
             if verdict is None:
@@ -1306,10 +2070,60 @@ class Tracer(BaseTracer):
                 results['rejected'].append(i)
                 continue
             h = hypotheses.hypotheses[i]
+            self.retire(h, hypotheses.weights[i])    # the commitment being replaced
             h.update_text(belief)
-            h.update_anchor(commitment)      # mints a new root via the invariant
+            # revision=True: this REPLACES a live particle's commitment, which is
+            # what anchor_revisions is meant to count. Nothing passed it before,
+            # so the counter read 0 everywhere and anchor staleness was
+            # unmeasurable. Split is deliberately not a revision -- its children
+            # are new hypotheses, not a changed mind.
+            # the standard travels with the commitment it settles
+            h.update_anchor(commitment, revision=True, standard=standard)
             h.note_operator('perturb')
             results['accepted'].append(i)
+        # REBIRTH AT FAIR SHARE. A replacement inherited the weight of the
+        # particle it replaced, and the expiry/collapse triggers select exactly
+        # the particles sitting at the floor -- so every minted commitment was
+        # born at ~eps and had to climb 8x just to reach parity. Measured on
+        # exp_3: median birth mass 0.028 for perturbation's mints against 0.189
+        # for split's children, 15 of 27 born below fair share. Under
+        # w_t ~ w_{t-1}^alpha * L_t^beta a floor-level prior cannot recover
+        # quickly however well the new commitment scores, so root-mass never
+        # recovered, the trigger stayed hot, and the operator re-fired on
+        # consecutive steps chasing a collapse its own mechanism guaranteed.
+        #
+        # A new hypothesis is not a weak version of the old one -- it is a new
+        # claim that has not yet been tested. It enters at fair share, and the
+        # mass comes proportionally from the rest of the population.
+        #
+        # MEASURED NET-NEGATIVE, SO THIS IS OFF BY DEFAULT. exp_4 vs exp_3 did
+        # raise median birth mass 0.047 -> 0.113 as intended, but the mass has to
+        # come from the established hypotheses, which lowers root-mass ESS across
+        # the population and trips the collapse trigger MORE often: 9 -> 13
+        # firings, 3 -> 6 consecutive re-fires, mint survival 59% -> 32%, argmax
+        # churn 8 -> 5. The reasoning that floor-born mints kept the trigger hot
+        # was wrong -- the fix fed the loop it was meant to break. Kept behind the
+        # flag as the evidence.
+        #
+        # Deliberate, logged mass move -- NOT asserted on, same class as the
+        # floor. sync_accumulator() re-keys the prior from these weights, so the
+        # reset reaches the accumulator and is not undone on the next step.
+        if results['accepted'] and getattr(self.args, 'rebirth_at_fair_share', False):
+            before = [float(x) for x in hypotheses.weights]
+            n = len(before)
+            if n:
+                fair = 1.0 / n
+                w = list(before)
+                for i in results['accepted']:
+                    if i < n:
+                        w[i] = fair
+                tot = sum(w)
+                if tot > 0:
+                    w = [x / tot for x in w]
+                    hypotheses.update_weights(np.array(w, dtype=float))
+                    results['mass_moved_by_rebirth'] = round(
+                        0.5 * sum(abs(a - b) for a, b in zip(w, before)), 5)
+                    results['rebirth_weight'] = round(fair, 5)
         hypotheses.texts = [h.text for h in hypotheses.hypotheses]
         hypotheses.anchors = [h.anchor for h in hypotheses.hypotheses]
         return results
@@ -1332,13 +2146,47 @@ class Tracer(BaseTracer):
             f"- Make them as mutually distinguishable as the hypotheses allow.\n"
             f"- If two hypotheses share a goal, give them the same clause; do not invent a "
             f"difference that is not there.\n\n"
-            f"Output exactly {n} lines:\n1. <clause>\n...\n{n}. <clause>")
-        raw = self.tracer_model.interact(block, system_prompt=system_prompt,
-                                         temperature=0, max_tokens=1024, stage='anchor')
+            # The weaker phrasing produced restatements: "Prevent mislabeling"
+            # -> "No images are mislabeled", which is the aim's success
+            # condition, not evidence, and carries no axis. The perturb path
+            # got usable standards from the same model ("a reconciliation
+            # report showing zero discrepancies between the dashboard's ratios
+            # and the sensor logs"), so the difference is the instruction, not
+            # the model. Name the failure explicitly and demand an artefact.
+            + standard_rule(target_agent, getattr(self.args, 'standard_prompt', None)) +
+            f"  Name who would produce it and what it would show. Two hypotheses may "
+            f"share a goal and differ ONLY here.\n\n"
+            f"Output exactly {n} lines:\n1. <clause> | STANDARD: <what would settle it>\n"
+            f"...\n{n}. <clause> | STANDARD: <what would settle it>")
+        # Thinking tokens count against max_output_tokens, so a reasoning model
+        # spends this budget before writing anything: measured 1021 thinking
+        # tokens and visible=None on gemini-2.5-pro at 1024, i.e. EVERY anchor
+        # extraction returned empty and fell back silently. Same defect as
+        # FINDINGS 1.2, which was about the likelihood scorer -- it recurs
+        # anywhere a fixed budget meets a model that reasons first, and 2.5-pro
+        # cannot disable thinking. Configurable so a caller using a reasoning
+        # model can raise it without editing this line.
+        raw = self.tracer_model.interact(
+            block, system_prompt=system_prompt, temperature=0,
+            max_tokens=int(getattr(self.args, 'anchor_max_tokens', 4096)),
+            stage='anchor')
         parsed = capture_and_parse_ordered_list(raw)
         if len(parsed) != n:
             print(Panel(f"anchor extraction returned {len(parsed)} of {n}", style="red", box=box.SIMPLE_HEAD))
             parsed = (parsed + [None] * n)[:n]
+        # Split the standard off the clause. The anchor must stay a bare
+        # commitment -- it is the root's identity and is compared by string
+        # elsewhere (merge, exclusion lists, the split parent block), so
+        # leaving "| STANDARD: ..." on it would change what those compare.
+        self._last_standards = []
+        clean = []
+        for c in parsed:
+            if not c:
+                clean.append(c); self._last_standards.append(None); continue
+            m = re.split(r"\s*\|\s*STANDARD\s*:\s*", c, maxsplit=1, flags=re.I)
+            clean.append(m[0].strip())
+            self._last_standards.append(m[1].strip() if len(m) > 1 else None)
+        parsed = clean
         return [p.strip() if p else None for p in parsed]
 
     def prompt_likelihood_comparative(self, existing_hypotheses: list, context_history: list, perception_history: list, action: str, target_agent: str = None):
@@ -1376,8 +2224,42 @@ class Tracer(BaseTracer):
         else:
             context_and_perception_str = ""
 
+        # BASELINE / NULL HYPOTHESIS. Likelihoods are normalized to sum to 1,
+        # so "every live hypothesis is wrong" is structurally unrepresentable:
+        # the best of a bad lot still receives ~1/n and keeps its mass. Measured
+        # at the Katara reversal, where none of the five commitments was about
+        # whether to kill Yon Rha: top likelihood 1.67x uniform, likelihood ESS
+        # 0.763, root-mass ESS 0.759 -- every health metric green at the exact
+        # step the filter missed the point.
+        #
+        # Adding a fixed null to the slate makes fit ABSOLUTE rather than merely
+        # relative. Each hypothesis is then credited by how far it beats "no
+        # particular commitment", which is the P(a|h)/P(a) correction the scorer
+        # never had; and the null ranking at the top is the surprise signal that
+        # nothing else in the system can produce.
+        # TWO nulls, not one. The single null answers "does any live commitment
+        # explain this action", which conflates two very different reasons for
+        # no: the action CONTRADICTS the commitments (real surprise, mint), or
+        # the action is routine traffic that reveals nothing about what the
+        # target is pursuing (mint nothing). On a hand-picked span the second
+        # case is rare; on the full 74-set blueberry_size topic only 8 sets
+        # carry any sizing vocabulary at all, so surprise fired on consecutive
+        # steps through ~250 turns of camera firmware and carnets and the filter
+        # minted almost every step. The routine null is what separates them, and
+        # it costs one extra slate item rather than another call.
+        use_baseline = getattr(self.args, 'baseline_scorer', False)
+        n_extra = 2 if use_baseline else 0
+        n_sent = n + n_extra
+        slate = list(existing_hypotheses)
+        if use_baseline:
+            slate = slate + [
+                f"{target_agent} has no particular commitment here beyond responding to "
+                f"the immediate situation.",
+                f"This message is routine traffic -- scheduling, logistics, tooling, "
+                f"acknowledgements -- and reveals nothing about what {target_agent} is "
+                f"trying to achieve."]
         hypothesis_block = "\n".join(
-            f"{i + 1}. {h.strip()}" for i, h in enumerate(existing_hypotheses))
+            f"{i + 1}. {h.strip()}" for i, h in enumerate(slate))
 
         mode = getattr(self.args, 'scorer_mode', 'rank')
         if mode == 'rank':
@@ -1396,7 +2278,7 @@ class Tracer(BaseTracer):
             system_prompt = (
                 f"You compare competing hypotheses about {target_agent}'s mind against an action "
                 f"{target_agent} actually took.\n\n"
-                f"First rank all {n} hypotheses from BEST to WORST predictor of that action. "
+                f"First rank all {n_sent} hypotheses from BEST to WORST predictor of that action. "
                 f"Commit to a strict order -- no ties. Then score each 0-100 for how strongly it "
                 f"predicts the action.\n\n"
                 f"Rules:\n"
@@ -1407,8 +2289,8 @@ class Tracer(BaseTracer):
                 f"- If the hypotheses genuinely are equivalent, say so in REASONING and score "
                 f"them alike; do not invent a difference that is not there.\n\n"
                 f"Answer in exactly this format, ranking FIRST:\n"
-                f"RANKING\n1st: <hypothesis number>\n...\n{n}th: <hypothesis number>\n\n"
-                f"ALLOCATION\n1: <0-100>\n...\n{n}: <0-100>\n\nREASONING\n"
+                f"RANKING\n1st: <hypothesis number>\n...\n{n_sent}th: <hypothesis number>\n\n"
+                f"ALLOCATION\n1: <0-100>\n...\n{n_sent}: <0-100>\n\nREASONING\n"
                 f"<what distinguishes the best from the worst>")
             prompt = (
                 f"<previous context>\n{context_and_perception_str}\n</previous context>\n\n"
@@ -1417,30 +2299,96 @@ class Tracer(BaseTracer):
                 f"<observed next action>\n{action}\n</observed next action>")
             raw = self.tracer_model.interact(prompt, system_prompt=system_prompt,
                                              temperature=0, max_tokens=2048, stage='likelihood')
-            alloc, err = parse_allocation(raw, n)
-            if alloc is not None and sum(alloc) <= 0:
-                return {'prompts': [prompt] * n, 'raw_predictions': raw,
+            alloc, err = parse_allocation(raw, n_sent)
+            # The allocation keys are ambiguous between rank position and
+            # hypothesis index; the RANKING block settles it. Everything
+            # downstream -- raw_scores, weights, raw_verdicts, likelihood_rank --
+            # is in HYPOTHESIS order, so the resolution happens here and the
+            # contract for callers is unchanged.
+            order, rank_err = (None, None) if alloc is None else parse_ranking(raw, n_sent)
+            if alloc is not None and order is not None:
+                scores, keying, agreement = map_allocation_to_hypotheses(alloc, order)
+            else:
+                scores, keying, agreement = alloc, 'unresolved', None
+            rank_info = {'ranking': order, 'alloc_keying': keying,
+                         'rank_alloc_agreement': agreement,
+                         'rank_unparsed': order is None, 'rank_parse_error': rank_err,
+                         'allocation_raw': alloc}
+            # Split the null off the slate and re-express every score as a
+            # MARGIN over it. A hypothesis that merely redescribes the action
+            # sits near the null and earns little; one that genuinely explains
+            # it clears the null by a wide gap. SURPRISE is the null winning:
+            # no live commitment beats "no particular commitment".
+            if use_baseline and scores is not None and len(scores) == n + 2:
+                baseline = float(scores[n])
+                routine = float(scores[n + 1])
+                raw_h = [float(x) for x in scores[:n]]
+                margins = [x - baseline for x in raw_h]
+                best = max(margins) if margins else 0.0
+                # Off-topic: the routine reading beats every commitment AND the
+                # null. Nothing to learn and nothing to mint -- the target simply
+                # is not pursuing anything here.
+                off_topic = (routine >= baseline and routine > max(raw_h or [0.0])) \
+                    or is_low_content(action)
+                rank_info['baseline_score'] = baseline
+                rank_info['routine_score'] = routine
+                rank_info['baseline_rank'] = 1 + sum(1 for x in raw_h if x > baseline)
+                rank_info['margins'] = margins
+                rank_info['best_margin'] = best
+                rank_info['off_topic'] = off_topic
+                rank_info['surprise'] = (best <= 0.0) and not off_topic
+                if best <= 0.0:
+                    # Nothing explains the action. The step carries no evidence
+                    # about WHICH existing hypothesis is right, so it must not
+                    # be allowed to reweight them -- staying flat is the honest
+                    # reading, and the mint is what actually responds.
+                    scores = [1.0] * n
+                else:
+                    # Blend a little uniform back in so a hypothesis sitting at
+                    # the null is not annihilated outright: it is uninformative,
+                    # not refuted, and a hard zero would make the floor the only
+                    # thing keeping it alive.
+                    blend = float(getattr(self.args, 'baseline_blend', 0.15))
+                    pos = [max(m, 0.0) for m in margins]
+                    tot = sum(pos) or 1.0
+                    scores = [(1.0 - blend) * (x / tot) + blend / n for x in pos]
+            elif use_baseline:
+                rank_info['surprise'] = None
+                rank_info['off_topic'] = None
+            if alloc is not None and order is None:
+                # Fall back to the positional read rather than inventing an
+                # order, but make the fallback visible: it is the old behaviour
+                # and it is wrong whenever the model keyed by rank.
+                print(Panel(f"rank scorer: RANKING unparsed ({rank_err}) -- "
+                            f"falling back to positional allocation",
+                            style="yellow", box=box.SIMPLE_HEAD))
+            if scores is not None and sum(scores) <= 0:
+                return {'prompts': [prompt] * n, 'system_prompt': system_prompt,
+                        'raw_predictions': raw,
                         'reasonings': re.split(r"REASONING", raw, flags=re.I)[-1].strip(),
-                        'raw_scores': alloc, 'weights': np.ones(n) / n,
-                        'answers': [str(v) for v in alloc], 'letters': [str(v) for v in alloc],
+                        'raw_scores': scores, 'weights': np.ones(n) / n,
+                        'answers': [str(v) for v in scores], 'letters': [str(v) for v in scores],
                         'parse_mask': [False] * n, 'parse_failures': 0,
-                        'allocation': alloc, 'allocation_sum': 0.0, 'all_zero': True, 'ties': True}
-            if alloc is None:
+                        'allocation': scores, 'allocation_sum': 0.0, 'all_zero': True,
+                        'ties': True, **rank_info}
+            if scores is None:
                 print(Panel(f"rank scorer unparsed ({err})", style="red", box=box.SIMPLE_HEAD))
-                return {'prompts': [prompt] * n, 'raw_predictions': raw, 'reasonings': raw,
+                return {'prompts': [prompt] * n, 'system_prompt': system_prompt,
+                        'raw_predictions': raw, 'reasonings': raw,
                         'raw_scores': [None] * n, 'weights': np.ones(n) / n,
                         'answers': [''] * n, 'letters': [None] * n,
                         'parse_mask': [True] * n, 'parse_failures': n,
-                        'allocation': None, 'parse_error': err}
-            total = float(sum(alloc))
-            weights = np.array([v / total for v in alloc], dtype=float)
-            return {'prompts': [prompt] * n, 'raw_predictions': raw,
+                        'allocation': None, 'parse_error': err, **rank_info}
+            total = float(sum(scores))
+            weights = np.array([v / total for v in scores], dtype=float)
+            return {'prompts': [prompt] * n, 'system_prompt': system_prompt,
+                    'raw_predictions': raw,
                     'reasonings': re.split(r"REASONING", raw, flags=re.I)[-1].strip(),
-                    'raw_scores': alloc, 'weights': weights,
-                    'answers': [str(v) for v in alloc], 'letters': [str(v) for v in alloc],
+                    'raw_scores': scores, 'weights': weights,
+                    'answers': [str(v) for v in scores], 'letters': [str(v) for v in scores],
                     'parse_mask': [False] * n, 'parse_failures': 0,
-                    'allocation': alloc, 'allocation_sum': total,
-                    'ties': len(set(alloc)) != n}
+                    'allocation': scores, 'allocation_sum': total,
+                    'ties': len(set(scores)) != n, **rank_info}
 
         if mode == 'independent':
             # Sum-to-100 forces ordering but COMPRESSES magnitude: with n=4 the
@@ -1575,7 +2523,46 @@ class Tracer(BaseTracer):
         # survive propagation rather than depend on luck.
         use_anchor = getattr(self.args, 'use_anchor', False)  # 3b: thread through propagation
         anchors = existing_hypotheses.anchors if use_anchor else [None] * len(existing_hypotheses.texts)
-        system_prompt = f"You are an expert assistant trying to predict {target_agent}'s thoughts."
+        # The question used to be, in full, "What did {target} believe?" -- asked
+        # with <current context> holding what SOMEBODY ELSE just said. Given
+        # that, "Katara believes that Aang is genuinely asking about the
+        # situation" is a correct answer, and the population filled up with
+        # readings of the interlocutor instead of the target's aim: measured
+        # 49-78% of top beliefs were "X believes that <other character> ...",
+        # and only 29-37% stated any want or intent at all.
+        #
+        # Note the asymmetry it introduced: `initialize` asks for the thoughts
+        # "that led to the action" -- a causal frame that demands an aim -- and
+        # propagation dropped that frame and never recovered it. So step 0
+        # produced motive-shaped hypotheses and every later step produced scene
+        # commentary.
+        #
+        # Asking for AIM before BELIEF restores the frame and forces the field
+        # to exist. This is the same lever as rank-before-score in the scorer:
+        # committing to a field before the prose is a cognitive change, not a
+        # formatting one.
+        # --legacy-form restores the pre-G2 propagation verbatim. It exists so the
+        # context fix can be measured on its own: every run after G2 carries the
+        # aim-first rewrite AND the 8-word commitment validator, which together
+        # cut belief texts from ~74 words to ~33 and dropped millimetre-carrying
+        # particles from 18% to 4%. Without a way to turn those off, "did the
+        # context fix help" cannot be answered separately from "did the form
+        # changes cost".
+        legacy = getattr(self.args, 'legacy_form', False)
+        system_prompt = (
+            f"You are an expert assistant trying to predict {target_agent}'s thoughts."
+        ) if legacy else (
+            f"You are an expert assistant inferring why {target_agent} acts as they do.\n\n"
+            f"Answer in exactly this form, AIM first:\n"
+            f"AIM: <one sentence naming what {target_agent} is trying to achieve>\n"
+            f"BELIEF: <one or two sentences on what {target_agent} now believes that bears "
+            f"on that aim>\n\n"
+            f"Rules:\n"
+            f"- The AIM is {target_agent}'s own goal. Not a question, not a request aimed at "
+            f"another character, not a description of what {target_agent} says or does.\n"
+            f"- Do NOT simply restate what another character said or did. If another "
+            f"character just spoke, say what it means FOR {target_agent}'S AIM.\n"
+            f"- The BELIEF may be about anyone, but it must bear on the aim.")
         propagation_prompts = []
         for hypothesis, anchor in zip(existing_hypotheses.texts, anchors):
             anchor_block = ""
@@ -1583,16 +2570,20 @@ class Tracer(BaseTracer):
                 anchor_block = (f"<{target_agent}'s standing commitment under this hypothesis>\n{anchor}\n"
                                 f"</{target_agent}'s standing commitment under this hypothesis>\n\n"
                                 f"Update the belief in light of the new context, but HOLD THIS "
-                                f"COMMITMENT FIXED. Do not drift toward a more obvious or more "
+                                f"COMMITMENT FIXED. Your AIM must restate this commitment, not "
+                                f"replace it. Do not drift toward a more obvious or more "
                                 f"popular reading of the scene.\n\n")
             propagation_prompts.append(
                 f"{self.trace_header}\n\n<previous context>\n{context_and_perception_str}\n</previous context>\n"
                 f"<previous prediction regarding {target_agent}'s thoughts>\n{hypothesis}\n"
                 f"</previous prediction regarding {target_agent}'s thoughts>\n\n{anchor_block}"
                 f"<current context>{self.assumption}\n{new_context}\n</current context>\n\n"
-                f"Question: What did {target_agent} believe?")
+                + (f"Question: What did {target_agent} believe?" if legacy else
+                   f"Question: What is {target_agent} trying to achieve here, and what does "
+                   f"{target_agent} now believe that bears on it?"))
         trace_log.set_stage('propagate')
-        propagated_texts = self.tracer_model.batch_interact(propagation_prompts, system_prompts=system_prompt, temperature=0, max_tokens=1024)
+        raw_texts = self.tracer_model.batch_interact(propagation_prompts, system_prompts=system_prompt, temperature=0, max_tokens=1024)
+        propagated_texts = list(raw_texts) if legacy else [compose_aim_belief(r, target_agent) for r in raw_texts]
         # anchors pass through unchanged -> roots inherit, per the anchor==root invariant
         propagated_hypotheses = HypothesesSetV3(target_agent, context_history, perception_history, propagated_texts, existing_hypotheses.weights, parent_hypotheses=existing_hypotheses.hypotheses, anchors=anchors if use_anchor else None)
 
@@ -1646,6 +2637,7 @@ class Tracer(BaseTracer):
         final_hypothesis = f"<{target_agent}'s updated thoughts>\n{aggregated_hypothesis}\n</{target_agent}'s updated thoughts>"
 
         return {'text': final_hypothesis, 'likelihood': list(hypotheses.weights), 'aggregated': True, 'context': hypotheses.contexts[-1], 'perception': hypotheses.perceptions[-1], 'hypothesis': aggregated_hypothesis}
+
 
     def chain_weighted_average_trace(self, hypotheses_list: List[HypothesesSetV3]) -> dict:
         """
@@ -1703,7 +2695,9 @@ class Tracer(BaseTracer):
         hypotheses_list = []
         context_history = []
         self._accum = {}   # accumulated prior is per-trace
+        self._retired = {}
         self._low_mass_run = 0
+        self._weak_run = {}
         for idx, (state_action, perceptions) in enumerate(zip(trajectory, perceptions_trajectory)):
             prop_ctx = None
             if idx == 0:
@@ -1722,6 +2716,7 @@ class Tracer(BaseTracer):
             perturb_info = None
             perturb_conditions = None
             cap_info = None
+            expiry_info = None
             split_info = None
             pre_snapshot = []
             ess = None
@@ -1775,8 +2770,10 @@ class Tracer(BaseTracer):
                     if getattr(self.args, 'enable_split', False):
                         new_hypotheses, _sm = self.split_and_merge(new_hypotheses, prop_ctx)
                         split_info = _sm
-                        if _sm.get('split_fired'):
+                        if _sm.get('split_net'):
                             operators.append('split')
+                        if _sm.get('expanded'):
+                            operators.append('expand')
                         if _sm.get('merged'):
                             operators.append('merge')
                         if _sm.get('split_fired') or _sm.get('merged'):
@@ -1819,16 +2816,51 @@ class Tracer(BaseTracer):
                         #                 is the hypothesis space going dead.
                         stagnation_cond = (mass_cond and not collapse_cond
                                            and self._low_mass_run >= k)
+                        # SURPRISE. The other two paths both measure the SHAPE of
+                        # the population -- how many roots, how the mass is spread.
+                        # Neither can see that every commitment in a perfectly
+                        # healthy-looking population is wrong, which is exactly
+                        # what happens at a narrative reversal. This path fires on
+                        # FIT: the null outranked every live commitment.
+                        surprise_cond = bool(
+                            getattr(self.args, 'surprise_perturb', False)
+                            and weight_results is not None
+                            and weight_results.get('surprise'))
+                        # RESAMPLE-MOVE (Gilks & Berzuini). A classical particle
+                        # filter gets divergence free: propagation adds noise, so
+                        # duplicates separate immediately. Here propagation runs at
+                        # temperature 0, so resampled copies stay BYTE-IDENTICAL --
+                        # measured persisting 9 turns, three particles spending
+                        # three LLM calls per turn computing the same thing.
+                        #
+                        # So the move must be applied explicitly, and it cannot be
+                        # gated on a separate diversity threshold: 8 of 17 resamples
+                        # fired while the root-mass condition was unmet and left
+                        # duplicates in place. Whenever resampling creates copies,
+                        # they get perturbed.
                         perturb_conditions = (mass_cond, collapse_cond,
                                               sum(len(v) - 1 for v in by_root.values() if len(v) > 1),
                                               self._low_mass_run,
-                                              'collapse' if (mass_cond and collapse_cond)
-                                              else ('stagnation' if stagnation_cond else None))
-                        if mass_cond and (collapse_cond or stagnation_cond):
+                                              'surprise' if surprise_cond
+                                              else ('resample_move' if (collapse_cond and 'resample' in operators and not mass_cond)
+                                              else ('collapse' if (mass_cond and collapse_cond)
+                                              else ('stagnation' if stagnation_cond else None))))
+                        just_resampled = 'resample' in operators
+                        # collapse repair fires whenever duplicates exist AND either
+                        # the diversity threshold tripped or we just resampled.
+                        if (collapse_cond and (mass_cond or just_resampled)) or stagnation_cond or surprise_cond:
                             # perturb only the OFFENDING particles: surplus copies
                             # of over-represented roots, weakest first.
                             idxs = []
-                            if collapse_cond:
+                            if surprise_cond:
+                                # Replace the lightest quarter. The leader is kept:
+                                # it may still be right about the standing goal even
+                                # when it fails to explain this one action, and the
+                                # point is to ADD a reading, not to destroy one.
+                                nrep = max(1, len(new_hypotheses.hypotheses) // 4)
+                                idxs = sorted(range(len(new_hypotheses.hypotheses)),
+                                              key=lambda j: float(new_hypotheses.weights[j]))[:nrep]
+                            elif collapse_cond:
                                 # PROTECT THE LEADER. Perturbation replaces only the
                                 # SURPLUS copies of an over-represented root; the
                                 # heaviest copy is always kept, so a hypothesis that
@@ -1855,10 +2887,19 @@ class Tracer(BaseTracer):
                                               key=lambda j: float(new_hypotheses.weights[j]))[:nrep]
                                 self._low_mass_run = 0
                             if idxs:
-                                print(Panel(f"root-mass ESS {rm:.3f} < {thr}: perturbing {len(idxs)} particle(s)",
-                                            title="Diversity Collapse", style="red", box=box.SIMPLE_HEAD))
-                                res = self.perturb_anchored(new_hypotheses, idxs,
-                                                            prop_ctx if idx > 0 else None)
+                                if surprise_cond:
+                                    print(Panel(f"null outranked every commitment: minting {len(idxs)}",
+                                                title="Surprise", style="yellow", box=box.SIMPLE_HEAD))
+                                else:
+                                    print(Panel(f"root-mass ESS {rm:.3f} < {thr}: perturbing {len(idxs)} particle(s)",
+                                                title="Diversity Collapse", style="red", box=box.SIMPLE_HEAD))
+                                # prop_ctx is built from the PREVIOUS contexts and
+                                # excludes the action just scored -- so on the
+                                # surprise path the mint would be blind to the very
+                                # thing that triggered it. Pass it explicitly.
+                                res = self.perturb_anchored(
+                                    new_hypotheses, idxs, prop_ctx if idx > 0 else None,
+                                    surprising_action=(state_action.get('action') if surprise_cond else None))
                                 operators.append('perturb')
                                 perturb_info = res
                                 new_hypotheses, _cap, _bound = self.enforce_population_cap(new_hypotheses)
@@ -1866,6 +2907,29 @@ class Tracer(BaseTracer):
                                     operators.append('cap')
                                 cap_info = (_cap, _bound)
                                 self.sync_accumulator(new_hypotheses)
+                    # WEIGHT-BASED EXPIRY -- independent of resampling and of
+                    # the collapse trigger above. Runs last so a particle already
+                    # replaced this step is not retired twice; its lineage is new
+                    # and its counter starts at zero.
+                    if getattr(self.args, 'enable_expiry', False):
+                        dead, exp_info = self.expire_weak(new_hypotheses,
+                                                  just_resampled='resample' in operators)
+                        expiry_info = exp_info
+                        if dead:
+                            print(Panel(
+                                f"{len(dead)} hypothesis(es) below {exp_info['expiry_threshold']:.4f} "
+                                f"for {exp_info['expiry_steps']} consecutive turns: retiring",
+                                title="Expiry", style="yellow", box=box.SIMPLE_HEAD))
+                            res = self.perturb_anchored(new_hypotheses, dead,
+                                                        prop_ctx if idx > 0 else None)
+                            operators.append('expire')
+                            if perturb_info is None:
+                                perturb_info = res
+                            new_hypotheses, _cap, _bound = self.enforce_population_cap(new_hypotheses)
+                            if _bound:
+                                operators.append('cap')
+                            cap_info = (_cap, _bound)
+                            self.sync_accumulator(new_hypotheses)
                     elif overall_text_diversity < 0.25:
                         print(Panel(f"Text diversity: {overall_text_diversity}", title="Low Variance Hypotheses", style="red"))
                         new_hypotheses = self.rejuvenate_hypotheses(new_hypotheses)
@@ -1880,7 +2944,7 @@ class Tracer(BaseTracer):
                            accum_info=accum_info, state_action=state_action,
                            pre_snapshot=pre_snapshot, perturb_info=perturb_info,
                            perturb_conditions=perturb_conditions, cap_info=cap_info,
-                           split_info=split_info)
+                           split_info=split_info, expiry_info=expiry_info)
             hypotheses_list.append(new_hypotheses)
 
             # update history

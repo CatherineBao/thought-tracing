@@ -4,6 +4,7 @@ Non-linear progression, as defined: strengthen, weaken, merge, split, revise.
 Shows the commitments themselves, not just the metrics.
 """
 import argparse, glob, sys
+import musing_layout as ml
 import trace_log as t
 
 
@@ -12,7 +13,7 @@ def main():
     ap.add_argument("run")
     ap.add_argument("--width", type=int, default=62)
     a = ap.parse_args()
-    fs = sorted(glob.glob(f"musing_out/{a.run}*.steps.jsonl"))
+    fs = ml.find(f"{a.run}*.steps.jsonl")
     if not fs:
         sys.exit(f"no steps file for {a.run}")
     st = t.read_steps(fs[0])

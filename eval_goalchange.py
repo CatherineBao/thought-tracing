@@ -12,6 +12,7 @@ Ground truth (established from the transcript, both sides quoted):
 Scored on the FINAL belief, which should reflect the LATE goal.
 """
 import argparse, glob, json, os, re
+import musing_layout as ml
 import run_musing as rm
 
 EARLY = "convince J-Oppenheimer not to appeal the charges against him"
@@ -50,7 +51,7 @@ def main():
     agg = {}
     for pref in a.runs:
         rows = []
-        for f in sorted(glob.glob(f"musing_out/tracer-*runid-{pref}*.jsonl")):
+        for f in sorted(ml.find(f"tracer-*runid-{pref}*.jsonl")):
             b = load(f)
             if not isinstance(b, str) or len(b) < 200:
                 continue

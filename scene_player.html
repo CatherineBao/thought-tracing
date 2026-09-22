@@ -1,0 +1,905 @@
+<title>__TITLE__</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html { box-sizing: border-box; height: 100%; }
+
+  :root {
+    --ground:    #e6eaee;
+    --surface:   #f8fafb;
+    --surface-2: #eef2f5;
+    --sunk:      #dde4e9;
+    --ink:       #0f1519;
+    --ink-2:     #4a5964;
+    --ink-3:     #7b8b96;
+    --rule:      #ccd6dd;
+    --rule-2:    #b2c0ca;
+
+    --a0:      #0f6f9e;
+    --a0-soft: #d8e8f1;
+    --a1:        #ad3a1f;
+    --a1-soft:   #f3ddd6;
+
+    --form:      #1f7a56;
+    --form-soft: #d7ebe1;
+    --drop:      #7d7266;
+    --drop-soft: #e5e0d9;
+
+    --serif: "Newsreader", Georgia, "Times New Roman", serif;
+    --sans:  "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono:  "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:    #0d1318;
+      --surface:   #151d24;
+      --surface-2: #1c262e;
+      --sunk:      #101820;
+      --ink:       #e2eaef;
+      --ink-2:     #9dafbb;
+      --ink-3:     #6c7f8c;
+      --rule:      #263239;
+      --rule-2:    #38474f;
+
+      --a0:      #56b1dc;
+      --a0-soft: #12303f;
+      --a1:        #e6795a;
+      --a1-soft:   #391d15;
+
+      --form:      #5fc79a;
+      --form-soft: #133024;
+      --drop:      #a2968a;
+      --drop-soft: #2a2620;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:    #0d1318;
+    --surface:   #151d24;
+    --surface-2: #1c262e;
+    --sunk:      #101820;
+    --ink:       #e2eaef;
+    --ink-2:     #9dafbb;
+    --ink-3:     #6c7f8c;
+    --rule:      #263239;
+    --rule-2:    #38474f;
+    --a0:      #56b1dc;
+    --a0-soft: #12303f;
+    --a1:        #e6795a;
+    --a1-soft:   #391d15;
+    --form:      #5fc79a;
+    --form-soft: #133024;
+    --drop:      #a2968a;
+    --drop-soft: #2a2620;
+  }
+
+  body {
+    margin: 0;
+    height: 100%;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .app {
+    height: 100%;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    max-width: 1500px;
+    margin: 0 auto;
+  }
+
+  /* ---------------------------------------------------------- masthead */
+  .top {
+    display: flex; align-items: baseline; gap: 14px 18px; flex-wrap: wrap;
+    padding: 14px 20px 12px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--surface);
+  }
+  .top h1 {
+    margin: 0;
+    font-family: var(--serif); font-weight: 600;
+    font-size: 21px; line-height: 1.1; letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .top h1 em { font-style: italic; font-weight: 400; color: var(--ink-2); }
+  .subtitle {
+    color: var(--ink-2); font-size: 12.5px; line-height: 1.45; max-width: 60ch;
+  }
+  .subtitle b { font-weight: 600; color: var(--ink); }
+  .top .spacer { flex: 1 1 40px; }
+  .runtags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .runtag {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.02em;
+    padding: 3px 7px; border-radius: 3px;
+    border: 1px solid var(--rule-2); color: var(--ink-2);
+    white-space: nowrap;
+  }
+
+  /* ------------------------------------------------------------ stage */
+  .stage {
+    display: grid;
+    grid-template-columns: minmax(232px, 1fr) minmax(320px, 1.55fr) minmax(232px, 1fr);
+    min-height: 0;
+    background: var(--ground);
+  }
+  /* Three agents: the two flanking boards keep their columns and the third
+     runs along the bottom under all of them. A third column would have made
+     every board too narrow to read a commitment in, and the transcript is the
+     thing the layout exists to keep central. */
+  .stage.three {
+    grid-template-rows: minmax(0, 1.55fr) minmax(0, 1fr);
+  }
+  .stage.three > .board.a0 { grid-column: 1; grid-row: 1; }
+  .stage.three > .spine    { grid-column: 2; grid-row: 1; }
+  .stage.three > .board.a1 { grid-column: 3; grid-row: 1; }
+  .stage.three > .board.wide {
+    grid-column: 1 / -1; grid-row: 2;
+    border-top: 1px solid var(--line);
+  }
+  /* the wide board lays its commitments out in columns rather than one tall list */
+  .stage.three > .board.wide .stack {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 6px 14px; align-content: start;
+  }
+  .tabs { display: none; }
+
+  /* ------------------------------------------------------------ board */
+  .board {
+    min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    background: var(--surface);
+    display: flex; flex-direction: column;
+  }
+  .board.a0 { border-right: 1px solid var(--rule); --hue: var(--a0); --hue-soft: var(--a0-soft); }
+  .board.a1   { border-left:  1px solid var(--rule); --hue: var(--a1);   --hue-soft: var(--a1-soft); }
+
+  .board-head {
+    position: sticky; top: 0; z-index: 3;
+    background: var(--surface);
+    border-bottom: 1px solid var(--rule);
+    padding: 11px 14px 9px;
+  }
+  .board-head::before {
+    content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--hue);
+  }
+  .board.a1 .board-head::before { inset: 0 0 0 auto; }
+  .who {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  }
+  .who .name {
+    font-family: var(--serif); font-weight: 600; font-size: 17px;
+    color: var(--hue); letter-spacing: -0.005em;
+  }
+  .who .stepno {
+    font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .role {
+    margin-top: 3px; font-size: 11px; line-height: 1.4; color: var(--ink-3);
+  }
+  .opline { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; min-height: 17px; align-items: center; }
+  .op {
+    font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 2px 5px; border-radius: 2px; background: var(--surface-2); color: var(--ink-2);
+    border: 1px solid var(--rule);
+  }
+  .op.ess { border-style: dashed; }
+  .op.quiet { opacity: .55; }
+
+  /* delta strip: what changed on this agent's latest turn */
+  .delta-strip { padding: 9px 14px 2px; display: flex; flex-direction: column; gap: 5px; }
+  .delta {
+    display: grid; grid-template-columns: 13px 1fr; gap: 7px;
+    font-size: 11.5px; line-height: 1.35;
+  }
+  .delta .sig { font-family: var(--mono); font-weight: 600; text-align: center; }
+  .delta.f .sig { color: var(--form); }
+  .delta.d .sig { color: var(--drop); }
+  .delta .lbl { min-width: 0; }
+  .delta.f .lbl b { color: var(--form); font-weight: 600; }
+  .delta.d .lbl b { color: var(--drop); font-weight: 600; text-decoration: line-through; text-decoration-thickness: 1px; }
+  .delta .why { color: var(--ink-3); }
+  .delta .why i { font-style: normal; color: var(--ink-2); }
+  .strip-none { padding: 9px 14px 2px; font-size: 11.5px; color: var(--ink-3); font-style: italic; font-family: var(--serif); }
+
+  /* ranked commitments */
+  .stack { list-style: none; margin: 0; padding: 8px 10px 22px; display: flex; flex-direction: column; gap: 2px; }
+  .cm {
+    padding: 6px 4px 7px; border-radius: 3px; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .cm:hover { background: var(--surface-2); }
+  .cm:focus-visible { outline: 2px solid var(--hue); outline-offset: 1px; }
+  .cm-top {
+    display: grid; grid-template-columns: 17px 1fr auto; gap: 6px; align-items: baseline;
+  }
+  .cm .rk {
+    font-family: var(--mono); font-size: 10px; color: var(--ink-3);
+    font-variant-numeric: tabular-nums; text-align: right;
+  }
+  .cm .anc {
+    font-family: var(--serif); font-size: 13.5px; line-height: 1.28; color: var(--ink);
+    text-wrap: pretty;
+  }
+  .cm .mass {
+    font-family: var(--mono); font-size: 11px; color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .cm.lead .anc { font-weight: 600; }
+  .cm.lead .mass { color: var(--hue); font-weight: 600; }
+  .bar {
+    margin: 5px 0 0 23px; height: 3px; border-radius: 2px; background: var(--sunk);
+    overflow: hidden;
+  }
+  .bar i {
+    display: block; height: 100%; width: calc(var(--m) * 100%);
+    background: var(--hue); border-radius: 2px;
+    transition: width .5s cubic-bezier(.22,.61,.36,1);
+  }
+  .cm .arrow {
+    font-family: var(--mono); font-size: 9.5px; margin-left: 5px;
+  }
+  .cm .arrow.up { color: var(--form); }
+  .cm .arrow.dn { color: var(--drop); }
+  .cm .arrow.nw { color: var(--form); font-weight: 600; }
+  .cm .detail {
+    display: none; margin: 6px 0 2px 23px; padding-left: 9px;
+    border-left: 2px solid var(--hue-soft);
+    font-family: var(--serif); font-size: 12.5px; line-height: 1.45; color: var(--ink-2);
+  }
+  .cm.open .detail { display: block; }
+  .cm .rid {
+    display: block; margin-top: 5px;
+    font-family: var(--mono); font-size: 9.5px; color: var(--ink-3); letter-spacing: 0.02em;
+  }
+  .cm.fresh { animation: pop .65s cubic-bezier(.22,.61,.36,1); }
+  @keyframes pop {
+    0%   { background: var(--form-soft); transform: translateY(-3px); opacity: 0; }
+    30%  { opacity: 1; }
+    100% { background: transparent; transform: none; }
+  }
+
+  /* -------------------------------------------------------- transcript */
+  .spine {
+    min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    background: var(--surface-2);
+    position: relative;
+  }
+  .spine-inner { padding: 0; }   /* bottom runway is set to the pane height in JS */
+  .scene-rule {
+    position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 18px;
+    background: var(--surface-2); border-bottom: 1px solid var(--rule);
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em;
+    font-weight: 600; color: var(--ink-3);
+  }
+  .scene-rule .n { font-family: var(--mono); letter-spacing: 0; text-transform: none; color: var(--ink-3); opacity: .8; }
+
+  .turn {
+    display: grid; grid-template-columns: 34px 1fr; gap: 10px;
+    padding: 7px 22px 7px 8px;
+    border-left: 3px solid transparent;
+    transition: background .2s, opacity .3s;
+  }
+  .turn .idx {
+    position: relative;
+    font-family: var(--mono); font-size: 10px; color: var(--ink-3);
+    text-align: right; padding-top: 6px; font-variant-numeric: tabular-nums;
+  }
+  /* a turn the filter scored: one dot, so the boards stay the place you read */
+  .turn.scored .idx::after {
+    content: ""; position: absolute; top: 11px; right: -6px;
+    width: 4px; height: 4px; border-radius: 50%; background: var(--rule-2);
+  }
+  .turn.scored.a0 .idx::after { background: var(--a0); }
+  .turn.scored.a1 .idx::after { background: var(--a1); }
+  .turn.ahead.scored .idx::after { background: var(--rule-2); }
+  .turn .line { min-width: 0; }
+  .turn .sp {
+    font-family: var(--sans); font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-3);
+    margin-right: 7px;
+  }
+  .turn .tx {
+    font-family: var(--serif); font-size: 16px; line-height: 1.48; color: var(--ink-2);
+    text-wrap: pretty;
+  }
+  .turn.a0 { border-left-color: var(--a0-soft); }
+  .turn.a1 { border-left-color: var(--a1-soft); }
+  .turn.a0 .sp { color: var(--a0); }
+  .turn.a1 .sp { color: var(--a1); }
+  .turn.a0 .tx, .turn.a1 .tx { color: var(--ink); }
+  .turn.ahead { opacity: .34; }
+  /* scenes 1-2 ran before the entry point: the filter saw them, playback does not */
+  .turn.preroll .tx { color: var(--ink-3); }
+  .turn.preroll .idx, .turn.preroll .sp { opacity: .7; }
+  .entry {
+    display: flex; align-items: center; gap: 9px;
+    margin: 4px 0 2px; padding: 5px 18px 5px 11px;
+    border-top: 1px solid var(--rule-2); border-bottom: 1px solid var(--rule-2);
+    background: var(--surface);
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--ink-2);
+  }
+  .entry::before { content: "▶"; color: var(--a0); letter-spacing: 0; }
+  .turn.now { background: var(--surface); }
+  .turn.now.a0 { border-left-color: var(--a0); }
+  .turn.now.a1 { border-left-color: var(--a1); }
+  .turn.now .tx { color: var(--ink); }
+
+  /* --------------------------------------------------------- transport */
+  .transport {
+    border-top: 1px solid var(--rule); background: var(--surface);
+    padding: 9px 16px calc(9px + env(safe-area-inset-bottom, 0px));
+    display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap;
+  }
+  .btns { display: flex; gap: 4px; align-items: center; }
+  button {
+    font-family: var(--sans); font-size: 12px; font-weight: 600; color: var(--ink);
+    background: var(--surface-2); border: 1px solid var(--rule-2); border-radius: 3px;
+    padding: 5px 9px; cursor: pointer; line-height: 1;
+    transition: background .15s, border-color .15s;
+  }
+  button:hover { background: var(--sunk); border-color: var(--ink-3); }
+  button:focus-visible { outline: 2px solid var(--a0); outline-offset: 1px; }
+  button.primary { min-width: 74px; }
+  button.on { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+  .speeds { display: flex; gap: 3px; }
+  .speeds button { font-family: var(--mono); font-size: 11px; padding: 5px 7px; font-weight: 500; }
+  .scrub { flex: 1 1 230px; display: flex; align-items: center; gap: 10px; min-width: 190px; }
+  input[type=range] { flex: 1; accent-color: var(--a0); min-width: 0; }
+  .pos {
+    font-family: var(--mono); font-size: 11px; color: var(--ink-2);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .pos b { color: var(--ink); font-weight: 600; }
+  .legend {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    font-size: 10.5px; color: var(--ink-3);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .legend i { font-family: var(--mono); font-style: normal; font-weight: 600; }
+  .legend .f i { color: var(--form); }
+  .legend .d i { color: var(--drop); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
+
+  /* ---------------------------------------------------------- narrow */
+  @media (max-width: 900px) {
+    .stage { grid-template-columns: 1fr; grid-template-rows: auto minmax(120px, 38%) minmax(0, 1fr); }
+    .tabs  { grid-row: 1; }
+    .board { grid-row: 2; }
+    .spine { grid-row: 3; }
+    .tabs {
+      display: flex; gap: 4px; padding: 8px 16px;
+      background: var(--surface); border-bottom: 1px solid var(--rule);
+    }
+    .board { border: 0 !important; border-bottom: 1px solid var(--rule) !important; }
+    .board[hidden] { display: none; }
+    .top h1 { font-size: 18px; }
+    .subtitle { font-size: 12px; }
+    .turn { grid-template-columns: 26px 1fr; padding-right: 16px; }
+    .turn .tx { font-size: 15px; }
+  }
+  /* Cultural lean. Two hues that are NOT the agent colours: the agent colour
+     says whose board this is, the lean says which vocabulary the commitment
+     speaks, and conflating them would make a Deskins commitment leaning
+     commercial unreadable. */
+  .cm.c-a { box-shadow: inset 3px 0 0 #b8860b; }
+  .cm.c-b { box-shadow: inset 3px 0 0 #2e7d5b; }
+  .cm.c-a .anc::before, .cm.c-b .anc::before {
+    display: inline-block; margin-right: 6px; padding: 1px 5px; border-radius: 3px;
+    font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase;
+    font-weight: 700; vertical-align: 1px; color: #fff; }
+  .cm.c-a .anc::before { content: var(--lexA, "A"); background: #b8860b; }
+  .cm.c-b .anc::before { content: var(--lexB, "B"); background: #2e7d5b; }
+  /* The transcript carries the same axis, so the reader can check the filter's
+     reading against the words that produced it. */
+  .turn.t-a .tx { box-shadow: inset 2px 0 0 #b8860b; padding-left: 8px; }
+  .turn.t-b .tx { box-shadow: inset 2px 0 0 #2e7d5b; padding-left: 8px; }
+  .leanTag { margin-left: 7px; padding: 1px 5px; border-radius: 3px; font-size: 9px;
+    letter-spacing: .05em; text-transform: uppercase; font-weight: 700; color: #fff; }
+  .leanTag.l-a { background: #b8860b; } .leanTag.l-b { background: #2e7d5b; }
+  .cm.clash { box-shadow: inset 3px 0 0 #c2410c; }
+  .cm.clash .anc { font-weight: 650; }
+  .cm.clash .anc::after { content: "against the room"; margin-left: 8px;
+    font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    color: #c2410c; font-weight: 600; opacity: .9; }
+  /* The standard is the field that names the axis, so it is set apart from
+     the belief prose rather than run in with it. */
+  .std { display: block; margin-top: 7px; padding-left: 9px; font-size: 11.5px;
+    line-height: 1.5; opacity: .92; box-shadow: inset 2px 0 0 var(--line); }
+  .std b { font-weight: 700; font-size: 9.5px; letter-spacing: .06em;
+    text-transform: uppercase; opacity: .65; margin-right: 5px; }
+  .lexkey { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px; opacity: .8; margin-top: 6px; }
+  .lexkey i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+</style>
+
+<div class="app">
+  <header class="top">
+    <h1 id="ttl"></h1>
+    <p class="subtitle" id="blurb"></p>
+    <div class="spacer"></div>
+    <div class="runtags" id="runtags"></div>
+  </header>
+
+  <div class="stage">
+    <div class="tabs">
+      <button id="tabK" class="on" type="button"></button>
+      <button id="tabZ" type="button"></button>
+    </div>
+
+    <aside class="board a0" id="boardK">
+      <div class="board-head">
+        <div class="who"><span class="name" id="nameK"></span><span class="stepno" id="stepK">—</span></div>
+        <p class="role" id="roleK"></p>
+        <div class="opline" id="opK"></div>
+      </div>
+      <div id="stripK"></div>
+      <ul class="stack" id="stackK"></ul>
+    </aside>
+
+    <section class="spine" id="spine" aria-label="Transcript">
+      <div class="spine-inner" id="spineInner"></div>
+    </section>
+
+    <aside class="board a1" id="boardZ">
+      <div class="board-head">
+        <div class="who"><span class="name" id="nameZ"></span><span class="stepno" id="stepZ">—</span></div>
+        <p class="role" id="roleZ"></p>
+        <div class="opline" id="opZ"></div>
+      </div>
+      <div id="stripZ"></div>
+      <ul class="stack" id="stackZ"></ul>
+    </aside>
+
+    <aside class="board a2 wide" id="boardW" hidden>
+      <div class="board-head">
+        <div class="who"><span class="name" id="nameW"></span><span class="stepno" id="stepW">—</span></div>
+        <p class="role" id="roleW"></p>
+        <div class="opline" id="opW"></div>
+      </div>
+      <div id="stripW"></div>
+      <ul class="stack" id="stackW"></ul>
+    </aside>
+  </div>
+
+  <footer class="transport">
+    <div class="btns">
+      <button id="restart" type="button" title="Back to scene 3; again for the whole episode">⏮</button>
+      <button id="back" type="button" title="Previous line">◀</button>
+      <button id="play" class="primary" type="button">▶ Play</button>
+      <button id="fwd" type="button" title="Next line">▶</button>
+      <button id="nextEv" type="button" title="Jump to the next belief update">⏭ update</button>
+      <button id="follow" class="on" type="button" aria-pressed="true"
+              title="Keep the line being scored at the top of the column">Follow</button>
+    </div>
+    <div class="speeds" role="group" aria-label="Playback speed">
+      <button data-sp="0.5" type="button">0.5×</button>
+      <button data-sp="1" class="on" type="button">1×</button>
+      <button data-sp="2" type="button">2×</button>
+      <button data-sp="4" type="button">4×</button>
+    </div>
+    <div class="scrub">
+      <input id="scrub" type="range" min="0" max="1" value="0" aria-label="Position in the scene">
+      <span class="pos">turn <b id="posN">0</b>/<span id="posT">0</span></span>
+    </div>
+    <div class="legend">
+      <span class="f"><i>+</i> forms</span>
+      <span class="d"><i>−</i> drops</span>
+      <span><i style="font-family:var(--mono)">0.55</i> posterior mass</span>
+    </div>
+  </footer>
+</div>
+
+<script id="trace" type="application/json">__DATA__</script>
+<script>
+(function () {
+  "use strict";
+  var D = JSON.parse(document.getElementById("trace").textContent);
+  var TURNS = D.turns, EVENTS = D.events, ROOTS = D.roots, SCENES = D.scenes;
+  var META = D.meta, AGENTS = META.agents.map(function (a) { return a.name; });
+  var NAGENTS = AGENTS.length;
+  if (NAGENTS > 2) {
+    document.querySelector(".stage").classList.add("three");
+    var w = document.getElementById("boardW"); if (w) w.hidden = false;
+  }
+
+  // Every event carries the FULL board, so the state at any turn is simply the
+  // last event at or before it -- no replay needed when the reader scrubs.
+  // One suffix per agent panel: K left, Z right, W the wide bottom board.
+  // Everything per-agent indexes through this rather than a 0/1 ternary, so a
+  // third agent needs no new branches.
+  var SUF = ["K", "Z", "W"];
+  var evAt = [[], [], []];        // evAt[agent][turn] -> index of governing event
+  var evOnTurn = {};             // turn -> events scored on that turn
+  (function () {
+    // One cursor per agent, sized to the cast rather than to two. With a fixed
+    // [-1,-1] a third agent's evAt row was never written, so evAt[2][cursor]
+    // came back undefined and its board rendered nothing at all.
+    var last = [];
+    for (var i = 0; i < NAGENTS; i++) { last.push(-1); evAt[i] = evAt[i] || []; }
+    for (var t = 0; t < TURNS.length; t++) {
+      for (var e = 0; e < EVENTS.length; e++) {
+        if (EVENTS[e].t === t) {
+          last[EVENTS[e].a] = e;
+          (evOnTurn[t] = evOnTurn[t] || []).push(e);
+        }
+      }
+      for (var i2 = 0; i2 < NAGENTS; i2++) evAt[i2][t] = last[i2];
+    }
+  })();
+
+  var OPNAME = { resample: "resample", perturb: "perturb", expire: "expire",
+                 split: "split", merge: "merge" };
+
+  var START = Math.max(0, Math.min(TURNS.length - 1, META.start || 0));
+  var cursor = START, playing = false, speed = 1, timer = null, follow = true;
+  var shownEv = [-1, -1];
+  var open = {};                 // root id -> expanded
+
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  };
+  var m3 = function (v) { return v.toFixed(3); };
+
+  /* ------------------------------------------------- transcript (static) */
+  function buildSpine() {
+    var sceneAt = {};
+    SCENES.forEach(function (s, i) { sceneAt[s.start] = { t: s.title, n: i + 1 }; });
+    var h = "";
+    for (var t = 0; t < TURNS.length; t++) {
+      if (t === START) h += '<div class="entry">Playback starts here</div>';
+      if (sceneAt[t]) {
+        h += '<div class="scene-rule"><span>' + esc(sceneAt[t].t.replace(" — ", " · ")) +
+             '</span><span class="n">turn ' + t + '</span></div>';
+      }
+      var sp = TURNS[t][0], tx = TURNS[t][1], tc = TURNS[t][2] || 0;
+      var a = AGENTS.indexOf(sp);
+      var cls = a >= 0 ? " a" + a : "";
+      if (evOnTurn[t]) cls += " scored";
+      // The turn's own lean, independent of what the filter made of it.
+      if (LEX.length && Math.abs(tc) >= 0.34) cls += tc < 0 ? " t-a" : " t-b";
+      var tag = (LEX.length && Math.abs(tc) >= 0.34)
+        ? '<span class="leanTag ' + (tc < 0 ? "l-a" : "l-b") + '">' +
+          esc(LEX[tc < 0 ? 0 : 1]) + "</span>" : "";
+      h += '<div class="turn' + cls + '" id="t' + t + '" data-t="' + t + '">' +
+             '<div class="idx">' + t + '</div><div class="line">' +
+               '<span class="sp">' + esc(sp) + tag + '</span>' +
+               '<span class="tx">' + esc(tx) + '</span>' +
+             '</div></div>';
+    }
+    $("spineInner").innerHTML = h;
+  }
+
+  function why(cause, other) {
+    if (!other) return '<span class="why">' + esc(cause) + '</span>';
+    return '<span class="why">' + esc(cause) + ' <i>' + esc(other) + '</i></span>';
+  }
+
+  /* ------------------------------------------------------ boards (live) */
+  var LEX = (META.lexicon || []);
+  // Feed the axis names into CSS so the badges READ as the two standards
+  // ("deliverable" / "measurable") instead of as two anonymous coloured dots.
+  if (LEX.length === 2) {
+    document.documentElement.style.setProperty("--lexA", JSON.stringify(LEX[0]));
+    document.documentElement.style.setProperty("--lexB", JSON.stringify(LEX[1]));
+  }
+  // OPP[a] = the OTHER agent's current board lean. A commitment on this board
+  // pointing the same way as the other board's lean is agreement; pointing the
+  // opposite way, hard, is the divergence -- that is what gets highlighted.
+  var OPP = [null, null, null];
+
+  function renderBoard(a) {
+    // Refresh both leans before drawing, so each board knows what the other is
+    // holding at this turn. Computed here rather than baked in because it
+    // depends on the cursor, not on the step.
+    // What everyone ELSE is holding, averaged. With two agents this is just the
+    // other board; with three, a commitment is "pulling against" the room
+    // rather than against one counterpart.
+    for (var k = 0; k < NAGENTS; k++) {
+      var sum = 0, cnt = 0;
+      for (var o = 0; o < NAGENTS; o++) {
+        if (o === k) continue;
+        var j = evAt[o][cursor];
+        if (j >= 0) { sum += (EVENTS[j].cult || 0); cnt++; }
+      }
+      OPP[k] = cnt ? sum / cnt : null;
+    }
+    var ei = evAt[a][cursor];
+    var sf = SUF[a];
+    var stack = $("stack" + sf);
+    var strip = $("strip" + sf);
+    var opline = $("op" + sf);
+    var stepno = $("step" + sf);
+
+    if (ei < 0) {
+      stack.innerHTML = "";
+      strip.innerHTML = '<p class="strip-none">Has not spoken yet — no commitments scored.</p>';
+      opline.innerHTML = "";
+      stepno.textContent = "—";
+      shownEv[a] = -1;
+      return;
+    }
+    var ev = EVENTS[ei], changed = shownEv[a] !== ei;
+
+    // FLIP: measure before the swap so a re-ranking reads as movement, not a cut.
+    var before = {};
+    if (changed && shownEv[a] >= 0) {
+      Array.prototype.forEach.call(stack.children, function (li) {
+        before[li.dataset.root] = li.getBoundingClientRect().top;
+      });
+    }
+
+    stepno.textContent = "step " + ev.s + " · turn " + ev.t;
+    var ops = (ev.ops || []).map(function (o) {
+      return '<span class="op">' + esc(OPNAME[o] || o) + "</span>";
+    }).join("");
+    if (!ops) ops = '<span class="op quiet">reweight only</span>';
+    if (ev.ess != null) ops += '<span class="op ess">root-ESS ' + ev.ess.toFixed(2) + "</span>";
+    if (ev.lead) ops += '<span class="op" style="color:var(--hue);border-color:var(--hue)">new leader</span>';
+    opline.innerHTML = ops;
+
+    var s = "";
+    ev.f.forEach(function (f) {
+      s += '<div class="delta f"><span class="sig">+</span><span class="lbl"><b>' +
+           esc(ROOTS[f[0]].anchor) + "</b> " + why(f[1], f[2]) + "</span></div>";
+    });
+    ev.d.forEach(function (d) {
+      s += '<div class="delta d"><span class="sig">−</span><span class="lbl"><b>' +
+           esc(ROOTS[d[0]].anchor) + "</b> " + why(d[1], d[2]) + "</span></div>";
+    });
+    strip.innerHTML = s || '<p class="strip-none">No commitment formed or dropped — only the weights moved.</p>';
+
+    var fresh = {};
+    ev.f.forEach(function (f) { fresh[f[0]] = 1; });
+    var h = "";
+    ev.b.forEach(function (b, i) {
+      var r = b[0], mass = b[1], copies = b[2], prev = b[3];
+      var arrow = "";
+      if (prev == null) arrow = '<span class="arrow nw">new</span>';
+      else if (prev > i) arrow = '<span class="arrow up">▲' + (prev - i) + "</span>";
+      else if (prev < i) arrow = '<span class="arrow dn">▼' + (i - prev) + "</span>";
+      // Which vocabulary this commitment speaks. The misalignment on this
+      // corpus is one word meaning two things, so a commitment leaning hard
+      // against the OTHER board's lean is the thing worth looking at.
+      var cult = (ROOTS[r].cult || 0);
+      var lean = cult > 0.34 ? " c-b" : cult < -0.34 ? " c-a" : "";
+      var opp = (LEX.length && OPP[a] != null && cult && Math.sign(cult) === Math.sign(OPP[a])
+                 && Math.abs(cult) > 0.34) ? " clash" : "";
+      h += '<li class="cm' + (i === 0 ? " lead" : "") + (open[r] ? " open" : "") +
+             (changed && fresh[r] ? " fresh" : "") + lean + opp +
+             '" data-root="' + r + '" tabindex="0" style="--m:' + mass.toFixed(4) + '">' +
+             '<div class="cm-top"><span class="rk">' + (i + 1) + '</span>' +
+             '<span class="anc">' + esc(ROOTS[r].anchor) + arrow +
+             (copies > 1 ? ' <span class="arrow dn">×' + copies + "</span>" : "") + "</span>" +
+             '<span class="mass">' + m3(mass) + "</span></div>" +
+             '<div class="bar"><i></i></div>' +
+             '<div class="detail">' + esc(ROOTS[r].text) +
+             (ROOTS[r].standard
+                ? '<span class="std"><b>settled by</b> ' + esc(ROOTS[r].standard) + "</span>"
+                : "") +
+             '<span class="rid">root ' + esc(r) + " · " + copies +
+             (copies === 1 ? " particle" : " particles") + "</span></div></li>";
+    });
+    stack.innerHTML = h;
+
+    if (changed && shownEv[a] >= 0) {
+      Array.prototype.forEach.call(stack.children, function (li) {
+        var o = before[li.dataset.root];
+        if (o == null) return;
+        var dy = o - li.getBoundingClientRect().top;
+        if (!dy) return;
+        li.style.transform = "translateY(" + dy + "px)";
+        li.style.transition = "none";
+        requestAnimationFrame(function () {
+          li.style.transition = "transform .48s cubic-bezier(.22,.61,.36,1)";
+          li.style.transform = "";
+        });
+      });
+    }
+    shownEv[a] = ei;
+  }
+
+  /* ------------------------------------------------------------ cursor */
+  var prevNow = null;
+  function paint(scroll, align) {
+    if (prevNow != null) {
+      var p = $("t" + prevNow);
+      if (p) p.classList.remove("now");
+    }
+    for (var t = 0; t < TURNS.length; t++) {
+      var el = $("t" + t);
+      if (!el) continue;
+      var ahead = t > cursor;
+      if (ahead !== el.classList.contains("ahead")) el.classList.toggle("ahead", ahead);
+      if (t < START && !el.classList.contains("preroll")) el.classList.add("preroll");
+    }
+    var cur = $("t" + cursor);
+    if (cur) {
+      cur.classList.add("now");
+      if (scroll && follow) {
+        var sp = $("spine"), r = cur.getBoundingClientRect(), b = sp.getBoundingClientRect();
+        // the scene rule is sticky at top: 0, so clear its height or it covers
+        // the very line we are scrolling to
+        var rule = sp.querySelector(".scene-rule");
+        var head = rule ? rule.offsetHeight : 30;
+        sp.scrollTo({ top: sp.scrollTop + (r.top - b.top) - head - 4,
+                      behavior: align === "instant" ? "auto" : "smooth" });
+      }
+    }
+    prevNow = cursor;
+    for (var ai = 0; ai < NAGENTS; ai++) renderBoard(ai);
+    $("scrub").value = cursor;
+    $("posN").textContent = cursor;
+  }
+
+  // Dwell: a line takes as long as it takes to read, and a line the filter
+  // scored holds a beat longer so the board move is legible.
+  function dwell() {
+    var base = 420 + TURNS[cursor][1].length * 19;
+    if (evOnTurn[cursor]) base += 900;
+    return Math.max(220, Math.min(4200, base)) / speed;
+  }
+
+  function tick() {
+    if (cursor >= TURNS.length - 1) { setPlaying(false); return; }
+    cursor++;
+    paint(true);
+    timer = setTimeout(tick, dwell());
+  }
+
+  function setPlaying(on) {
+    playing = on;
+    clearTimeout(timer);
+    $("play").textContent = on ? "❚❚ Pause" : "▶ Play";
+    $("play").classList.toggle("on", on);
+    if (on) { setFollow(true); timer = setTimeout(tick, dwell()); }
+  }
+
+  function go(t, align) {
+    cursor = Math.max(0, Math.min(TURNS.length - 1, t));
+    paint(true, align);
+  }
+
+  /* ------------------------------------------------------------ wiring */
+  $("play").onclick = function () {
+    if (!playing && cursor >= TURNS.length - 1) go(START);
+    setPlaying(!playing);
+  };
+  $("back").onclick = function () { setPlaying(false); go(cursor - 1); };
+  $("fwd").onclick = function () { setPlaying(false); go(cursor + 1); };
+  $("restart").onclick = function () {
+    setPlaying(false); setFollow(true);
+    go(cursor > START ? START : 0, "instant");  // scene 3, then the whole episode
+  };
+  $("nextEv").onclick = function () {
+    setPlaying(false); setFollow(true);
+    for (var e = 0; e < EVENTS.length; e++) {
+      if (EVENTS[e].t > cursor) { go(EVENTS[e].t); return; }
+    }
+    go(TURNS.length - 1);
+  };
+  Array.prototype.forEach.call(document.querySelectorAll(".speeds button"), function (b) {
+    b.onclick = function () {
+      speed = parseFloat(b.dataset.sp);
+      document.querySelectorAll(".speeds button").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+      if (playing) { clearTimeout(timer); timer = setTimeout(tick, dwell()); }
+    };
+  });
+  $("scrub").oninput = function () { setPlaying(false); setFollow(true); go(+this.value); };
+
+  $("spineInner").addEventListener("click", function (e) {
+    var row = e.target.closest(".turn");
+    if (row) { setPlaying(false); setFollow(true); go(+row.dataset.t, "instant"); }
+  });
+
+  // expanding a commitment shows the belief in full, with the root it hangs on
+  function bindStack(id) {
+    $(id).addEventListener("click", function (e) {
+      var li = e.target.closest(".cm");
+      if (!li) return;
+      open[li.dataset.root] = !open[li.dataset.root];
+      li.classList.toggle("open");
+    });
+    $(id).addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      var li = e.target.closest(".cm");
+      if (!li) return;
+      e.preventDefault();
+      open[li.dataset.root] = !open[li.dataset.root];
+      li.classList.toggle("open");
+    });
+  }
+  SUF.slice(0, NAGENTS).forEach(function (k) { bindStack("stack" + k); });
+
+  function setFollow(on) {
+    follow = on;
+    $("follow").classList.toggle("on", on);
+    $("follow").setAttribute("aria-pressed", on ? "true" : "false");
+    if (on) paint(true, "instant");
+  }
+  ["wheel", "touchmove", "mousedown"].forEach(function (evt) {
+    $("spine").addEventListener(evt, function () {
+      if (follow) setFollow(false);              // the reader took the wheel
+    }, { passive: true });
+  });
+  $("follow").onclick = function () { setFollow(!follow); };
+
+  document.addEventListener("keydown", function (e) {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return;
+    if (e.key === " ") { e.preventDefault(); $("play").click(); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); $("fwd").click(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); $("back").click(); }
+  });
+
+  // narrow layout: one board at a time
+  function tab(a) {
+    $("boardK").hidden = a !== 0;
+    $("boardZ").hidden = a !== 1;
+    if (NAGENTS > 2) $("boardW").hidden = false;
+    $("tabK").classList.toggle("on", a === 0);
+    $("tabZ").classList.toggle("on", a === 1);
+  }
+  var mq = window.matchMedia("(max-width: 900px)");
+  function applyMQ() {
+    if (mq.matches) { tab($("tabZ").classList.contains("on") ? 1 : 0); }
+    else {
+      $("boardK").hidden = false; $("boardZ").hidden = false;
+      if (NAGENTS > 2) $("boardW").hidden = false;
+    }
+  }
+  $("tabK").onclick = function () { tab(0); };
+  $("tabZ").onclick = function () { tab(1); };
+  mq.addEventListener("change", applyMQ);
+
+  function runway() {
+    var sp = $("spine");
+    $("spineInner").style.paddingBottom = Math.max(120, sp.clientHeight - 60) + "px";
+  }
+  window.addEventListener("resize", function () {
+    runway();
+    if (follow) paint(true, "instant");
+  });
+
+  function chrome() {
+    document.title = META.title;
+    $("ttl").innerHTML = esc(META.title) + ' <em>— ' + esc(META.tagline) + "</em>";
+    // An empty <p> still holds its own line-height and margin, which is exactly
+    // the height the bottom board is short of. Remove the node, not its text.
+    if (META.blurb) $("blurb").innerHTML = META.blurb;
+    else $("blurb").remove();
+    $("runtags").innerHTML = META.tags.map(function (t) {
+      return '<span class="runtag">' + esc(t) + "</span>";
+    }).join("");
+    SUF.slice(0, NAGENTS).forEach(function (k, i) {
+      var a = META.agents[i];
+      $("name" + k).textContent = a.name;
+      // The tabs only exist for the two flanking boards -- the wide bottom
+      // board is always visible and never tabbed, so tabW is absent by design.
+      // Without this guard a third agent threw here and killed the rest of
+      // boot, leaving the transcript unbuilt and the counter at 0.
+      var tb = $("tab" + k);
+      if (tb) tb.textContent = a.name;
+      $("role" + k).textContent = a.role || "";
+    });
+    $("scrub").max = TURNS.length - 1;
+    $("posT").textContent = TURNS.length;
+  }
+
+  chrome();
+  buildSpine();
+  applyMQ();
+  runway();
+  paint(false);
+  // open on the entry point rather than the top of the file
+  requestAnimationFrame(function () { paint(true, "instant"); });
+})();
+</script>

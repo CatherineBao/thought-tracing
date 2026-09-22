@@ -208,6 +208,20 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-.venv/
-musing/out/
+# OS cruft
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+
+# Project: run artifacts and generated reports.
+# Everything under musing_out/ is regenerable from the scripts that wrote it
+# (run_musing.py, scene_player.py, stacked.py, evolution.py, weight_chart.py...).
+# Note: scene_player.html at the repo root is a SOURCE template, not output.
 musing_out/
+musing/out/

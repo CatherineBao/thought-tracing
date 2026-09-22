@@ -22,6 +22,7 @@ specific claim -- an unsupported verdict is discarded rather than counted.
 """
 import argparse
 import glob
+import musing_layout as ml
 import json
 import os
 import re
@@ -135,7 +136,7 @@ def main():
     results = {}
     for pref in a.runs:
         scores = []
-        for f in sorted(glob.glob(f"musing_out/tracer-*runid-{pref}*.jsonl")):
+        for f in sorted(ml.find(f"tracer-*runid-{pref}*.jsonl")):
             belief = load_summary(f)
             if len(belief) < 200:
                 continue

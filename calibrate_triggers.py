@@ -21,6 +21,7 @@ on identical contexts.
 """
 import argparse
 import glob
+import musing_layout as ml
 import statistics
 
 import trace_log as t
@@ -30,7 +31,7 @@ WARMUP = 21   # ~3 time constants at alpha = 0.85
 
 def series(pattern, field, warmup=WARMUP, min_steps=28):
     out = []
-    for f in sorted(glob.glob(pattern)):
+    for f in ml.find(pattern):
         st = t.read_steps(f)
         if len(st) < min_steps:
             continue
@@ -66,8 +67,8 @@ def density_report(vals, label, candidates):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--n8", default="musing_out/p3e_n2_*.steps.jsonl")
-    ap.add_argument("--n12", default="musing_out/p4n12_*.steps.jsonl")
+    ap.add_argument("--n8", default="p3e_n2_*.steps.jsonl")
+    ap.add_argument("--n12", default="p4n12_*.steps.jsonl")
     a = ap.parse_args()
 
     print(f"OFFLINE trigger calibration (post-warm-up, step >= {WARMUP})\n")

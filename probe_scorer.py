@@ -18,9 +18,10 @@ import json
 import os
 
 import trace_log
+import musing_layout as ml
 import run_musing as rm
 
-CACHE = "musing_out/probe_context.json"
+CACHE = ml.meta_path("probe_context.json")
 
 
 def prepare(tracer, ctx, step):
@@ -87,7 +88,7 @@ def main():
     ap.add_argument("--step", type=int, default=8)
     ap.add_argument("--n", type=int, default=4)
     ap.add_argument("--model", default="gemini-2.5-flash")
-    ap.add_argument("--out", default="musing_out/probe_scorer.json")
+    ap.add_argument("--out", default=ml.meta_path("probe_scorer.json"))
     ap.add_argument("--scorer", default="comparative", choices=["comparative","isolated"])
     ap.add_argument("--scorer-mode", default="rank", choices=["rank","independent","allocation"])
     a = ap.parse_args()

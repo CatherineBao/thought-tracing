@@ -17,6 +17,8 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
+import musing_layout
+
 
 def new_particle_id() -> str:
     return uuid.uuid4().hex[:8]
@@ -97,6 +99,12 @@ class ParticleRecord:
     resample_duplicate: bool = False
     text: str = ""
     anchor: Optional[str] = None
+    # What would settle the question for the target under this hypothesis --
+    # the evidence they would accept as showing they were wrong. Recorded
+    # beside the anchor rather than inside it so the anchor stays comparable
+    # by string, and so a run can be scored on standard-divergence without
+    # re-deriving the axis from vocabulary after the fact.
+    standard: Optional[str] = None
     # normalized posterior weight, used for argmax churn
     weight: float = 0.0
     # unnormalized accumulated log-weight: alpha*log w_{t-1} + beta*log L_t.
@@ -149,6 +157,12 @@ class StepRecord:
     # supposed to prevent that drift, so the pre-3b baseline must carry this
     # field or the anchor cannot be shown to work.
     within_root_divergence: Optional[float] = None
+    # Whether within_root_divergence was DEFINED this step (some root held >1
+    # particle). Undefined is not zero: a step where every root is a singleton
+    # has no within-root pairs to measure, which is a different fact from
+    # "copies agreed". tracer._log_step has always set this, but it was never a
+    # declared field, so asdict() dropped it and it never reached disk.
+    within_root_divergence_defined: Optional[bool] = None
     # Merge threshold resolved from THIS run's similarity distribution, and the
     # percentile it came from. Logged so a later reader knows the cut was
     # derived, not inherited.
@@ -182,8 +196,19 @@ class StepRecord:
     split_weight_condition: Optional[int] = None
     split_disagree_condition: Optional[int] = None
     split_candidates: Optional[int] = None
+    split_children: Optional[int] = None    # children created by split this step
+    split_net: Optional[int] = None         # parents that genuinely PARTITIONED (2+ survived merge)
+    expanded: Optional[int] = None          # parents narrowed to ONE surviving child, not a partition
+    merged_count: Optional[int] = None      # pairs absorbed by merge this step
+    net_new_roots: Optional[int] = None     # roots alive after that were not alive before
     population_cap: Optional[int] = None
     cap_bound: bool = False        # particles eligible to perturb
+    expiry_threshold: Optional[float] = None
+    expiry_steps: Optional[int] = None
+    expiry_weight_condition: Optional[int] = None   # particles below threshold now
+    expiry_duration_condition: Optional[int] = None # ...of those, retired this step
+    max_weak_run: Optional[int] = None
+    expiry_frozen: bool = False    # resample step: counters neither bumped nor cleared
     minted_roots: List[str] = field(default_factory=list)
     minted_root_weight: Optional[float] = None
     # roots holding >1 particle, i.e. where drift is even possible
@@ -233,6 +258,34 @@ class StepRecord:
     likelihood_system_prompt: Optional[str] = None
     scored_texts: List[str] = field(default_factory=list)
     scored_action: Optional[str] = None
+
+    # How the rank scorer's ALLOCATION block was keyed. The block is ambiguous
+    # between rank position and hypothesis index and the model uses BOTH; the
+    # keying is inferred per step from agreement with the RANKING block, so it
+    # is a per-step property and has to be logged as one. Without it a run
+    # cannot be audited for the mis-keying that made likelihood positional.
+    #   ranking              -- 0-based permutation, best first, as stated
+    #   alloc_keying         -- 'rank' | 'hypothesis' | 'ambiguous' | 'unresolved'
+    #   rank_alloc_agreement -- concordance of the chosen reading with ranking
+    #   allocation_raw       -- the numbers as written, before resolution
+    # Absolute-fit signal from the null hypothesis on the slate. `surprise` is
+    # the only quantity in the system that can say "none of these explains it":
+    # every other health metric (likelihood ESS, root-mass ESS, weights) is
+    # normalized and therefore blind to collective misfit.
+    surprise: Optional[bool] = None
+    # Routine traffic: the action reveals nothing about what the target wants.
+    # Distinct from surprise, which is the action CONTRADICTING the live
+    # commitments. Conflating them made the filter mint on nearly every step
+    # of a low-signal span.
+    off_topic: Optional[bool] = None
+    routine_score: Optional[float] = None
+    baseline_score: Optional[float] = None
+    baseline_rank: Optional[int] = None
+    best_margin: Optional[float] = None
+    ranking: Optional[List[int]] = None
+    alloc_keying: Optional[str] = None
+    rank_alloc_agreement: Optional[float] = None
+    allocation_raw: Optional[List[Any]] = None
 
     llm_calls: List[Dict[str, Any]] = field(default_factory=list)
     wall_time_s: Optional[float] = None
@@ -626,9 +679,9 @@ class RunLogger:
         self.out_dir = out_dir
         self.run_id = run_id
         self.meta = dict(meta or {})
-        os.makedirs(out_dir, exist_ok=True)
-        self.path = os.path.join(out_dir, f"{run_id}.steps.jsonl")
-        self.runs_path = os.path.join(out_dir, "runs.jsonl")
+        self.path = musing_layout.run_path(
+            run_id, f"{run_id}.steps.jsonl", out_dir, create=True)
+        self.runs_path = musing_layout.runs_jsonl(out_dir)
         self.steps: List[StepRecord] = []
         self._fh = open(self.path, "w", encoding="utf-8")
         self._t0 = time.time()

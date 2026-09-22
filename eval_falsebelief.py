@@ -21,6 +21,7 @@ third score catches vacuity.
 """
 import argparse
 import glob
+import musing_layout as ml
 import json
 import os
 import re
@@ -87,7 +88,7 @@ def run_meta(prefix, out_dir="musing_out"):
     than the runner did -- judging one target's beliefs against another's ground
     truth. The run records its own target_agent and context_id; read those.
     """
-    path = os.path.join(out_dir, "runs.jsonl")
+    path = ml.runs_jsonl(out_dir)
     if not os.path.exists(path):
         return None
     meta = None
@@ -129,7 +130,7 @@ def main():
     results = {}
     for pref in a.runs:
         scores = []
-        for f in sorted(glob.glob(f"musing_out/tracer-*runid-{pref}*.jsonl")):
+        for f in sorted(ml.find(f"tracer-*runid-{pref}*.jsonl")):
             d = {}
             with open(f, encoding="utf-8") as fh:
                 for line in fh:

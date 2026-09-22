@@ -15,6 +15,7 @@ import json
 import re
 
 import run_musing as rm
+import musing_layout as ml
 
 
 def main():
@@ -22,7 +23,7 @@ def main():
     ap.add_argument("--n", type=int, default=4)
     a = ap.parse_args()
 
-    c = json.load(open("musing_out/probe_context.json"))
+    c = json.load(open(ml.meta_path("probe_context.json")))
     args = rm.make_args(run_id="gate", output_dir="musing_out", n_hypotheses=a.n,
                         use_anchor=True, anchored_perturbation=True)
     tr = rm.build_tracer(args)

@@ -19,6 +19,7 @@ from copy import deepcopy
 
 import trace_log
 import run_musing as rm
+import musing_layout as ml
 from utils import overall_jaccard_similarity
 
 
@@ -115,11 +116,12 @@ def main():
         print("  -> temperature reaches the sampler but the prompt constrains the output.")
         print("     Sampler is fine; this belongs to the diversity budget, not a dropped temperature.")
 
-    with open("musing_out/gate0_result.json", "w", encoding="utf-8") as fh:
+    gate0_path = ml.meta_path("gate0_result.json")
+    with open(gate0_path, "w", encoding="utf-8") as fh:
         json.dump({"context": ctx["context_id"], "step": step_k, "steps": n_steps,
                    "prompt_chars": len(prompt), "hot": hot, "cold": cold,
                    "verdict": verdict}, fh, indent=2)
-    print("  wrote musing_out/gate0_result.json")
+    print(f"  wrote {gate0_path}")
 
 
 if __name__ == "__main__":

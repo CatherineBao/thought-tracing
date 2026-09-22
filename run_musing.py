@@ -167,13 +167,28 @@ def make_args(**overrides) -> SimpleNamespace:
         use_anchor=False,    # PHASE 3b intervention -- thread anchor through propagation
         anchored_perturbation=False,  # PHASE 3e -- off by default
         root_mass_threshold=0.5,      # 3e fires below this
+        baseline_scorer=False,        # null hypothesis on the slate -> absolute fit + surprise
+        infer_motive=False,           # abductive proposer + whole-record role prior
+        legacy_form=False,            # restore pre-G2 propagation + no commitment validator
+        standard_prompt='v1',         # STANDARD_PROMPTS variant; see eval_motive_sep.py
+        revive_retired=False,         # expiry becomes a cache: bring a commitment back if it fits
+        baseline_blend=0.15,          # uniform mixed back in so a null-level hypothesis survives
+        surprise_perturb=False,       # mint when the null outranks every live commitment
+        alpha=0.85,                   # prior exponent; ~6.7x steady-state amplification
+        beta=1.0,                     # likelihood exponent
+        eps_frac=0.12,                # weight floor, as a fraction of 1/N
         ess_divisor=4.0,              # PRODUCTION: resample below pop/4 (=0.25)
         stagnation_steps=3,           # 3e stagnation path: k consecutive low-mass steps
         enable_split=False,           # PHASE 4
         split_weight_quantile=0.20,   # calibrated at N=12: ~1.60x mean, 2.7 firings/run
         split_children=2,
         protect_leader=1,          # keep the heaviest copy of each root
+        enable_expiry=False,       # weight-based retirement, off by default
+        rebirth_at_fair_share=False,
+        expiry_weight_frac=0.5,
+        expiry_steps=6,
         merge_percentile=95.0,        # Phase 4 merge cut, resolved per run (jaccard)
+        anchor_max_tokens=4096,       # thinking models spend this before writing
     )
     args.update(overrides)
     return SimpleNamespace(**args)
@@ -206,6 +221,19 @@ def main():
                     help="trace ONE named set directly (e.g. an odyssey disguise scene), "
                          "bypassing gold/silver selection")
     ap.add_argument("--target", default=None, help="target agent for --set-id")
+    ap.add_argument("--merge-speakers", default=None,
+                    help="trace a COALITION as one agent, e.g. "
+                         "'Product=Deskins,Burdett;Customer=Rodriguez,Letelier'. Those "
+                         "speakers are relabelled to the coalition name in the transcript, so "
+                         "--target Product traces the group's shared position. Use when one "
+                         "side of an argument is too thin to trace alone -- measured on the "
+                         "blueberry_size topic, Deskins+Burdett hold 18 turns against "
+                         "Rodriguez+Letelier's 366, so the product side cannot be traced "
+                         "as an individual.")
+    ap.add_argument("--set-ids", default=None,
+                    help="comma-separated set ids stitched in order, e.g. a whole episode. "
+                         "Joined the same way stitch_gold joins a gap, so the context format "
+                         "is identical -- only the selection differs.")
     ap.add_argument("--min-target-turns", type=int, default=0,
                     help="minimum turns the TARGET speaks. High-unknowable contexts have\n                         an absent target, who therefore speaks less and yields a short\n                         trajectory -- 5 steps in one case. Both must be constrained.")
     ap.add_argument("--min-missed-chars", type=int, default=None,
@@ -225,6 +253,43 @@ def main():
     ap.add_argument("--use-anchor", action="store_true", help="PHASE 3b (implies --extract-anchors)")
     ap.add_argument("--anchored-perturbation", action="store_true", help="PHASE 3e (implies --use-anchor)")
     ap.add_argument("--root-mass-threshold", type=float, default=0.5)
+    # A null hypothesis on the slate is the only way the system can say "none of
+    # these explains it": likelihoods are normalized, so they can never all fall.
+    ap.add_argument("--chronological", action="store_true",
+                    help="interleave the listed sets' turns by timestamp instead of "
+                         "concatenating whole sets, so step order matches real time")
+    ap.add_argument("--standard-prompt", default="v1",
+                    help="which STANDARD_PROMPTS variant the proposer/split/seeder use; "
+                         "tuned against eval_motive_sep.py")
+    ap.add_argument("--legacy-form", action="store_true",
+                    help="restore the pre-G2 propagation question and disable the commitment "
+                         "validator, so the context fix can be measured on its own")
+    ap.add_argument("--revive-retired", action="store_true",
+                    help="treat expiry as a cache rather than a delete: when a mint fires, first "
+                         "check whether a previously retired commitment would have predicted the "
+                         "action, and bring it back with its original root if it beats the null")
+    ap.add_argument("--infer-motive", action="store_true",
+                    help="derive a SEAT/STAKE prior from the whole record once, and ask the "
+                         "proposer what would have to be TRUE for these messages to be worth "
+                         "sending, instead of what the speaker wants")
+    ap.add_argument("--baseline-scorer", action="store_true",
+                    help="add a null hypothesis to the comparative slate and score each "
+                         "hypothesis by its MARGIN over it (absolute fit, not just relative)")
+    ap.add_argument("--baseline-blend", type=float, default=0.15,
+                    help="uniform fraction mixed back into margin-derived likelihoods")
+    ap.add_argument("--surprise-perturb", action="store_true",
+                    help="mint a new commitment when the null outranks every live one "
+                         "(implies --baseline-scorer)")
+    # Accumulator constants. tracer.accumulate has always read these via
+    # getattr(), but nothing could set them and no run recorded which values it
+    # used -- so every run before this flag existed is alpha=0.85, beta=1.0,
+    # eps_frac=0.12 by construction. They are logged into the run meta now.
+    ap.add_argument("--alpha", type=float, default=0.85,
+                    help="prior exponent in w_t ~ w_{t-1}^alpha * L_t^beta "
+                         "(0 = no accumulation; steady-state amplification ~1/(1-alpha))")
+    ap.add_argument("--beta", type=float, default=1.0, help="likelihood exponent")
+    ap.add_argument("--eps-frac", type=float, default=0.12,
+                    help="weight floor as a fraction of 1/N")
     ap.add_argument("--ess-divisor", type=float, default=4.0, help="resample below pop/DIV (production 4.0)")
     ap.add_argument("--stagnation-steps", type=int, default=3)
     ap.add_argument("--enable-split", action="store_true", help="PHASE 4 split+merge")
@@ -233,12 +298,47 @@ def main():
     ap.add_argument("--protect-leader", type=int, default=1,
                     help="copies of each root kept safe from perturbation (0 = old behaviour)")
     ap.add_argument("--merge-percentile", type=float, default=95.0)
+    ap.add_argument("--rebirth-at-fair-share", action="store_true", default=False,
+                    help="mints enter at 1/n instead of inheriting the replaced particle's "
+                         "weight. MEASURED NET-NEGATIVE and OFF by default: exp_3 vs exp_4 "
+                         "raised median birth mass 0.047->0.113 as intended, but taking that "
+                         "mass from established hypotheses lowered root-mass ESS, tripped the "
+                         "collapse trigger more often (9->13 firings, 3->6 consecutive), and "
+                         "cut mint survival 59%%->32%% and argmax churn 8->5. Kept as the "
+                         "evidence for that finding.")
+    ap.add_argument("--enable-expiry", action="store_true",
+                    help="retire a hypothesis held below EXPIRY_WEIGHT_FRAC/n for "
+                         "EXPIRY_STEPS consecutive turns, minting a replacement")
+    ap.add_argument("--expiry-weight-frac", type=float, default=0.5,
+                    help="expiry threshold as a fraction of fair share 1/n (0.5 -> 0.0625 at n=8)")
+    ap.add_argument("--expiry-steps", type=int, default=6,
+                    help="consecutive INFORMATIVE turns (resample steps frozen) a root "
+                         "must hold sub-threshold mass before retirement. Measured: regret "
+                         "rate is flat at ~8%% across k, so k sets turnover volume, not "
+                         "accuracy -- 6 gives ~5 retirements/run.")
     ap.add_argument("--seed", type=int, default=None,
                     help="seed resampling draws. NOTE: fixes WHICH particles are duplicated, "
                          "not WHETHER a resample fires -- trigger crossings follow the ESS "
                          "trajectory, which varies with scorer non-determinism.")
     ap.add_argument("--show-action-to-propagation", action="store_true",
                     help="restore the circular pre-fix behaviour, for A/B")
+    # select_gold's band lives in its own keyword defaults and main() called it
+    # with no arguments, so --min-chars/--max-chars could only ever narrow the
+    # already-banded output. These reach the selector itself.
+    ap.add_argument("--no-prominent-only", action="store_true",
+                    help="drop select_gold's prominent-target requirement")
+    ap.add_argument("--min-missed-turns", type=int, default=8,
+                    help="select_gold's min_turns; the default 8 is its own")
+    ap.add_argument("--band-min-chars", type=int, default=8000,
+                    help="select_gold's min_chars. Lower to widen the pool: the default "
+                         "band yields 17 gold contexts at >=20 target turns, relaxed 44")
+    ap.add_argument("--band-max-chars", type=int, default=30000,
+                    help="select_gold's max_chars")
+    ap.add_argument("--min-action-steps", type=int, default=0,
+                    help="floor on trajectory length. The coverage gap only appears where\n"
+                         "resampling fires and resampling needs steps, so a short context is\n"
+                         "a guaranteed tie. Selection on a PROCESS property, independent of\n"
+                         "the verdicts, so it does not bias which cases come out plausible")
     a = ap.parse_args()
 
     if a.seed is not None:
@@ -246,7 +346,63 @@ def main():
         import numpy as _np
         _np.random.seed(a.seed)
     corpus = load_corpus(a.corpus)
-    if a.set_id:
+    if a.set_ids:
+        ids = [x.strip() for x in a.set_ids.split(",") if x.strip()]
+        # coalition map: speaker -> coalition name
+        remap = {}
+        if a.merge_speakers:
+            for grp in a.merge_speakers.split(";"):
+                if "=" not in grp:
+                    continue
+                name, members = grp.split("=", 1)
+                for m in members.split(","):
+                    if m.strip():
+                        remap[m.strip()] = name.strip()
+        parts, used, nt = [], [], 0
+        line = lambda t: f"{remap.get(t['speaker'], t['speaker'])}: {t.get('text') or ''}"
+        if a.chronological:
+            # Interleave every turn by timestamp instead of concatenating whole
+            # sets. Sorting the SETS is not enough: bloomfield-0329 alone runs
+            # 2024-10-28 to 2025-01-08, so listing it first puts January content
+            # ahead of October content from every later set. Measured on the
+            # blueberry_size span: the filter met Burdett's 7 Jan "no" at turn 24
+            # and only reached October traffic at turn 39, which makes any
+            # "before the reveal" claim about step order meaningless.
+            #
+            # This mixes threads, which is a real cost -- a Slack set is one
+            # conversation and interleaving breaks its adjacency. It is the right
+            # trade only when the question is about WHEN something became
+            # knowable, which is exactly what early-detection asks.
+            all_turns = []
+            for sid in ids:
+                st = corpus["by_id"].get(sid)
+                if st is None:
+                    raise SystemExit(f"set {sid} not found in {a.corpus}")
+                all_turns.extend(st["turns"]); used.append(sid); nt += st["n_turns"]
+            all_turns.sort(key=lambda t: t.get("sent") or "")
+            parts = ["\n".join(line(t) for t in all_turns)]
+            print(f"[chronological] {nt} turns interleaved, "
+                  f"{(all_turns[0].get('sent') or '')[:10]} -> {(all_turns[-1].get('sent') or '')[:10]}")
+        else:
+            for sid in ids:
+                st = corpus["by_id"].get(sid)
+                if st is None:
+                    raise SystemExit(f"set {sid} not found in {a.corpus}")
+                if remap:
+                    # rebuild the transcript with coalition labels. Verified lossless
+                    # against full_context on 200/200 sets when remap is empty.
+                    parts.append("\n".join(line(t) for t in st["turns"]))
+                else:
+                    parts.append(st["full_context"])
+                used.append(sid); nt += st["n_turns"]
+        if not a.target:
+            raise SystemExit("--set-ids requires --target")
+        blob = "\n".join(parts)
+        contexts = [{"context_id": f"{a.corpus}:{a.target}:{used[0]}->{used[-1]}",
+                     "role": "scene", "target_agent": a.target, "full_context": blob,
+                     "set_ids": used, "missed_set_ids": [],
+                     "stitched_chars": len(blob), "n_turns": nt}]
+    elif a.set_id:
         st = corpus["by_id"].get(a.set_id)
         if st is None:
             raise SystemExit(f"set {a.set_id} not found in {a.corpus}")
@@ -257,7 +413,12 @@ def main():
                      "set_ids": [a.set_id], "missed_set_ids": [],
                      "stitched_chars": len(st["full_context"]), "n_turns": st["n_turns"]}]
     else:
-        contexts = (select_gold(corpus) if a.role == "gold" else select_silver(corpus))
+        contexts = (select_gold(corpus,
+                                prominent_only=not a.no_prominent_only,
+                                min_turns=a.min_missed_turns,
+                                min_chars=a.band_min_chars,
+                                max_chars=a.band_max_chars)
+                    if a.role == "gold" else select_silver(corpus))
     if a.max_chars:
         contexts = [c for c in contexts if c["stitched_chars"] <= a.max_chars]
     if a.min_chars:
@@ -268,6 +429,22 @@ def main():
                        for s in ctx["missed_set_ids"] if s in corpus["by_id"])
         contexts = [c for c in contexts if _missed(c) >= a.min_missed_chars]
         contexts.sort(key=lambda c: _missed(c))   # smallest qualifying = cheapest
+    if a.min_action_steps:
+        # A trajectory step carries an action only when the target speaks, and
+        # only those steps reweight, so the target's own turn count -- not the
+        # context's total -- is what bounds how many times the filter can
+        # resample. Same quantity --min-target-turns measures; kept separate so
+        # the process-property floor is legible as its own pre-registered choice.
+        def _acts(ctx):
+            n = 0
+            for sid in ctx["set_ids"]:
+                st = corpus["by_id"].get(sid)
+                if st:
+                    n += sum(1 for t in st["turns"] if t["speaker"] == ctx["target_agent"])
+            return n
+        before = len(contexts)
+        contexts = [c for c in contexts if _acts(c) >= a.min_action_steps]
+        print(f"  --min-action-steps {a.min_action_steps}: {before} -> {len(contexts)} contexts")
     if a.min_target_turns:
         def _tturns(ctx):
             n = 0
@@ -292,12 +469,24 @@ def main():
                      use_anchor=a.use_anchor or a.anchored_perturbation,
                      anchored_perturbation=a.anchored_perturbation,
                      root_mass_threshold=a.root_mass_threshold,
+                     alpha=a.alpha, beta=a.beta, eps_frac=a.eps_frac,
+                     baseline_scorer=a.baseline_scorer or a.surprise_perturb,
+                     infer_motive=a.infer_motive,
+                     revive_retired=a.revive_retired,
+                     legacy_form=a.legacy_form,
+                     standard_prompt=a.standard_prompt,
+                     baseline_blend=a.baseline_blend,
+                     surprise_perturb=a.surprise_perturb,
                      ess_divisor=a.ess_divisor, merge_percentile=a.merge_percentile,
                      stagnation_steps=a.stagnation_steps,
                      enable_split=a.enable_split,
                      split_weight_quantile=a.split_weight_quantile,
                      split_children=a.split_children,
-                     protect_leader=a.protect_leader)
+                     protect_leader=a.protect_leader,
+                     enable_expiry=a.enable_expiry,
+                     rebirth_at_fair_share=a.rebirth_at_fair_share,
+                     expiry_weight_frac=a.expiry_weight_frac,
+                     expiry_steps=a.expiry_steps)
     tracer = build_tracer(args)
 
     from trace_log import RunLogger
@@ -323,10 +512,30 @@ def main():
             "use_anchor": a.use_anchor or a.anchored_perturbation,
             "anchored_perturbation": a.anchored_perturbation,
             "root_mass_threshold": a.root_mass_threshold,
+            "alpha": a.alpha,
+            "baseline_scorer": a.baseline_scorer or a.surprise_perturb,
+            "infer_motive": a.infer_motive,
+            "revive_retired": a.revive_retired,
+            "legacy_form": a.legacy_form,
+            "standard_prompt": a.standard_prompt,
+            "baseline_blend": a.baseline_blend,
+            "surprise_perturb": a.surprise_perturb,
+            "beta": a.beta,
+            "eps_frac": a.eps_frac,
             "ess_divisor": a.ess_divisor,
             "stagnation_steps": a.stagnation_steps,
+            "enable_expiry": a.enable_expiry,
+            "rebirth_at_fair_share": a.rebirth_at_fair_share,
+            "expiry_weight_frac": a.expiry_weight_frac,
+            "expiry_steps": a.expiry_steps,
             "enable_split": a.enable_split,
             "merge_percentile": a.merge_percentile,
+            # self-describing runs: the evaluator reconstructs the judge window
+            # from these rather than re-deriving selection, which is how four
+            # earlier evaluations produced invalid numbers.
+            "set_ids": ctx.get("set_ids"),
+            "missed_set_ids": ctx.get("missed_set_ids"),
+            "scorer_mode": a.scorer_mode,
         })
         tracer.attach_logger(logger)
         try:
