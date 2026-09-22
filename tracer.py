@@ -272,6 +272,24 @@ def sole_standard_method(method_list):
     return std[0] if len(std) == 1 else None
 
 
+def normalize_commitment(clause):
+    """Collapse whitespace and strip emphasis markers from a commitment clause.
+
+    valid_commitment already did this before TESTING a candidate, but the
+    caller stored the raw string, so a model that emphasised its answer wrote
+    "**Forgive Yon Rha**" into the anchor. The anchor is compared BY STRING --
+    it is the root's identity -- so the same commitment arriving with and
+    without asterisks founds two roots, splits the mass that should have been
+    one hypothesis's, and counts twice in every diversity and novelty metric.
+    Observed live: "Forgive her mother's killer", "**Forgive Yon Rha's
+    actions**" and "**Forgive Yon Rha personally**" ran as three separate
+    roots.
+    """
+    if not clause:
+        return clause
+    return " ".join(str(clause).split()).strip("*").strip()
+
+
 def valid_commitment(clause, max_words=COMMITMENT_MAX_WORDS, enabled=True):
     """Is this clause an aim of the target's, rather than a move against someone?
 
@@ -1733,7 +1751,7 @@ class Tracer(BaseTracer):
             for c, b, sd in pairs:
                 ok, why = valid_commitment(c, enabled=not getattr(self.args,'legacy_form',False))
                 if ok:
-                    kept.append((c, b, sd))
+                    kept.append((normalize_commitment(c), b, sd))
                 else:
                     info.setdefault('rejected_commitments', []).append(
                         {'clause': c, 'reason': why, 'method': parent_method, 'site': 'split'})
@@ -2152,7 +2170,7 @@ class Tracer(BaseTracer):
         # drop any that duplicate an earlier one in this same batch
         uniq, seen_c = [], set()
         for c, b, sd in found:
-            key = c.strip().lower().rstrip('.')
+            key = normalize_commitment(c).lower().rstrip('.')
             ok, why = valid_commitment(c, enabled=not getattr(self.args,'legacy_form',False))
             if not ok:
                 results.setdefault('rejected_commitments', []).append(
@@ -2160,7 +2178,7 @@ class Tracer(BaseTracer):
                 continue
             if key and key not in seen_c:
                 seen_c.add(key)
-                uniq.append((c.strip(), b.strip(), sd))
+                uniq.append((normalize_commitment(c), b.strip(), sd))
         results['proposed_raw'] = len(found)
         results['proposed_unique'] = len(uniq)
         results['proposed_with_standard'] = sum(1 for _, _, sd in uniq if sd)
