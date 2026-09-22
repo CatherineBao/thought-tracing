@@ -208,7 +208,7 @@ def pooled(case, seeds, variant, members):
     out = []
     for sd in seeds:
         for m in members:
-            st = standards(f"{case[:2]}{variant}s{sd}_{m}")
+            st = standards(rid_for(case, variant, sd, m))
             if st:
                 out += st
     return out
@@ -260,7 +260,7 @@ def score_case(case, seeds, variant="v1", quiet=False):
         for g, members in cfg["groups"].items():
             pooled = []
             for m in members:
-                rid = f"{case[:2]}{variant}s{sd}_{m}"
+                rid = rid_for(case, variant, sd, m)
                 st = standards(rid)
                 if st is None:
                     return None, f"missing run {rid}"
@@ -295,6 +295,20 @@ def score_case(case, seeds, variant="v1", quiet=False):
             "consistency": cons, "modal": top[0], "per_seed": per_seed}, None
 
 
+TAG = ""   # set by --tag; distinguishes ARMS that share a case/variant/seed
+
+
+def rid_for(case, variant, seed, member):
+    """Run id for one arm member.
+
+    TAG defaults to "" so every id is byte-identical to what this file has
+    always produced -- the runs already on disk stay findable and comparable.
+    A non-empty tag is what keeps a profiled arm from overwriting the
+    unprofiled run it is supposed to be measured against.
+    """
+    return f"{case[:2]}{variant}{TAG}s{seed}_{member}"
+
+
 def launch(case, seed, variant="v1", extra=None, controls=True):
     cfg = CASES[case]
     out = []
@@ -306,7 +320,7 @@ def launch(case, seed, variant="v1", extra=None, controls=True):
             ctl_members += CONTROLS[case][k]
     for m in out + ctl_members:
         merge = (CONTROL_MERGE[case] if m in ctl_members else cfg["merge"])
-        rid = f"{case[:2]}{variant}s{seed}_{m}"
+        rid = rid_for(case, variant, seed, m)
         cmd = [".venv/bin/python", "run_musing.py", "--corpus", "bloomfield",
                "--target", m, "--set-ids", cfg["sets"], "--chronological",
                "--n-hypotheses", "8", "--tracing-model", "gemini-2.5-flash",
@@ -337,7 +351,7 @@ def self_control(case, seeds, variant="v1"):
         for m in members:
             ds = []
             for sd in seeds:
-                st = standards(f"{case[:2]}{variant}s{sd}_{m}")
+                st = standards(rid_for(case, variant, sd, m))
                 if st is None:
                     continue
                 d, n = dist(st)
@@ -359,7 +373,7 @@ def score_control(case, seeds, variant="v1"):
         for g in ("a", "b"):
             pooled = []
             for m in ctl[g]:
-                st = standards(f"{case[:2]}{variant}s{sd}_{m}")
+                st = standards(rid_for(case, variant, sd, m))
                 if st is None:
                     return None
                 pooled += st
@@ -377,14 +391,22 @@ def main():
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--variant", default="v1", help="STANDARD_PROMPTS variant to run/score")
     ap.add_argument("--score-only", action="store_true")
+    ap.add_argument("--tag", default="",
+                    help="distinguish an ARM sharing this case/variant/seed, e.g. 'p' for "
+                         "a --character-profile arm. Empty keeps the historical run ids.")
+    ap.add_argument("--extra", default=None,
+                    help="extra flags passed through to run_musing.py, space separated, "
+                         "e.g. '--character-profile'")
     a = ap.parse_args()
+    globals()["TAG"] = a.tag
+    extra = a.extra.split() if a.extra else None
     cases = list(CASES) if a.case == "both" else [a.case]
     seeds = list(range(a.seeds))
     total = []
     for c in cases:
         if not a.score_only:
             for s in seeds:
-                launch(c, s, a.variant)
+                launch(c, s, a.variant, extra=extra)
         print(f"\n{c} [{a.variant}]:")
         r, err = score_case(c, seeds, a.variant)
         if err:

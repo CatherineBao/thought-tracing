@@ -92,7 +92,7 @@ ROSTER_LIMIT = 6
 
 
 def render_profile(profiles, target: str, roster=(), include_quotes: bool = False,
-                   roster_limit: int = ROSTER_LIMIT, exclude=()) -> str:
+                   roster_limit: int = ROSTER_LIMIT, exclude=(), gate=None) -> str:
     """The prior block for `target`, in infer_role_prior()'s register.
 
     `roster` is the other speakers present in the traced context, most central
@@ -120,6 +120,8 @@ def render_profile(profiles, target: str, roster=(), include_quotes: bool = Fals
     me = recs.get(target)
     if not me:
         return ""
+    if not gate_passes(confidence_of(profiles, target), gate):
+        return ""
 
     lines = []
     for label, key in (("SEAT", "seat"), ("STAKE", "stake"), ("PRESSURE", "pressure"),
@@ -138,7 +140,8 @@ def render_profile(profiles, target: str, roster=(), include_quotes: bool = Fals
     # tracing Wolf -- which is self-referential in a way a genuinely wrong
     # record would not be, and tips the model off that something is off.
     skip = set(exclude) | {target}
-    present = [r for r in roster if r not in skip and r in recs][:roster_limit]
+    present = [r for r in roster if r not in skip and r in recs
+               and gate_passes(confidence_of(profiles, r), gate)][:roster_limit]
     rel = me.get("relations") or {}
     others = []
     for r in present:
@@ -162,6 +165,123 @@ def render_profile(profiles, target: str, roster=(), include_quotes: bool = Fals
             lines.append("IN THEIR WORDS: " + "; ".join(f'"{q}"' for q in qs))
 
     return "\n".join(lines)
+
+
+SETTLES_MODES = ('assert', 'test')
+
+# Below this, a profile is not injected AT ALL.
+#
+# A HARD gate, not a graded one, and that is an empirical choice rather than a
+# stylistic one. The 'test' mode was an attempt to make the model discount a
+# prior by telling it to -- record first, note ranked weaker, admissible only
+# on silence -- and it moved adoption the WRONG way: handed someone else's
+# record, the target landed 0.08 from it, inside the same-seed noise floor.
+# Prose that asks a model to hold something lightly does not make it hold it
+# lightly. So the only lever measured to work is whether the text is there.
+DEFAULT_CONFIDENCE_GATE = 0.65
+
+
+def confidence_of(profiles, token: str):
+    """The external system's own stated confidence in this record, or None."""
+    rec = people(profiles).get(token) or {}
+    c = rec.get("read_confidence")
+    try:
+        return float(c) if c is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def gate_passes(confidence, gate) -> bool:
+    """Whether a record is confident enough to be injected at all.
+
+    A record with NO stated confidence passes: the gate is there to suppress
+    reads the source itself flags as weak, not to suppress sources that do not
+    report confidence. Silence is not a low score.
+    """
+    if gate is None:
+        return True
+    if confidence is None:
+        return True
+    return confidence >= gate
+
+
+def settles_rule(profiles, token: str, target: str, mode: str = 'assert',
+                 gate=None) -> str:
+    """The STANDARD-site clause: what this person has historically settled on.
+
+    WHY THIS IS A SEPARATE INJECTION FROM THE ANCHOR ONE. The anchor says what
+    someone wants; the standard says what evidence would show they had got it.
+    tracer.py's own note on the v3 variant is the argument for putting a
+    profile here: "a standard is invented per COMMITMENT, from plausibility,
+    while the thing we want to measure is a property of the PERSON. Commitments
+    churn every step; the person does not." A standing record is exactly that
+    persistent property, and until now it was the one input the field never
+    got.
+
+    PERSISTS, unlike the anchor block. The anchor profile fires once at seeding
+    because it stands for the understanding you walk in holding. A settlement
+    disposition is not a starting guess -- it is the most stable thing about
+    someone -- so it speaks at every site that derives a standard, on every
+    step.
+
+    APPENDED, NEVER REPLACING, per standard_block's rule: eval_motive_sep's
+    lexicon is fitted to the register v1-v4 produce, and shifting that register
+    would make the sweep measure the binning rather than the people.
+
+    NOT A TOKEN. The clause deliberately never contains COLLEAGUE, CUSTOMER,
+    MEASUREMENT or DOCUMENT. v4 asks the model to pick one of those four and
+    eval_motive_sep bins on them, so supplying one would close the loop: the
+    eval would score whether the model can copy a word back, which the scramble
+    control already established it can.
+    """
+    recs = people(profiles)
+    rec = recs.get(token) or {}
+    s = _clause(rec.get("settles"))
+    if not s:
+        return ""
+    if not gate_passes(confidence_of(profiles, token), gate):
+        return ""
+
+    if mode == 'assert':
+        # The original. States the disposition and asks for it to be weighed.
+        # MEASURED TO STEER: handed Lyubovsky's clause, Wolf's outside-party
+        # share collapsed 0.35 -> 0.11 while instrument spiked 0.17 -> 0.43,
+        # overshooting Lyubovsky's own 0.27. The scrambled run landed closer to
+        # the record it was GIVEN than to the person it was tracing, and the
+        # trailing "if the record contradicts it, follow the record" did not
+        # hold. An assertion placed next to a question gets answered with the
+        # assertion.
+        return (f"- What is known about {target} from prior working history: {target} {s}. "
+                f"Weigh that against what this record shows; if the record contradicts it, "
+                f"follow the record.\n")
+
+    # 'test' -- the prior as a hypothesis, not an answer.
+    #
+    # Three structural changes, each aimed at the measured failure:
+    #   ORDER. The record-derivation instruction comes FIRST and the prior
+    #     arrives after it. In 'assert' the prior was the last thing read
+    #     before answering, which is the position the form constraint occupies
+    #     in methods.py precisely because last-read wins.
+    #   RANK. The prior is named a weaker source than the record, explicitly,
+    #     rather than being offered as a peer to weigh.
+    #   SCOPE. It is admissible only where the record is SILENT. "Contradicts"
+    #     was too high a bar -- a record that merely fails to support the prior
+    #     does not contradict it, so the old wording licensed the prior
+    #     everywhere except head-on collision, which almost never occurs.
+    #
+    # The output contract is untouched: no new fields, no change to what the
+    # variant asks for, so eval_motive_sep's binning still applies and the arms
+    # remain comparable. Same reason standard_block appends and never replaces.
+    return (f"- Decide this from the record FIRST. Look at what {target} has actually "
+            f"treated as settling something here: what they accepted without arguing, "
+            f"what they kept pressing on after being given an answer, and what made "
+            f"them stop pressing. Answer from that pattern.\n"
+            f"- Only if the record does not show it, you may fall back on this note "
+            f"from prior working history: {target} {s}. The note is a WEAKER source "
+            f"than the record and may not override it. If the record shows {target} "
+            f"settling some other way, follow the record and ignore the note. Do not "
+            f"use the note to choose between two things the record already "
+            f"distinguishes.\n")
 
 
 def profile_meta(profiles, target: str, roster=(), traced: str = None) -> dict:
