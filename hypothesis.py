@@ -9,7 +9,7 @@ from trace_log import new_particle_id
 
 
 class HypothesisV3():
-    def __init__(self, target_agent: str, contexts: List[str], perceptions: List[dict], text: str, weight: float, parent_hypothesis: 'HypothesisV3' = None, anchor: str = None, particle_id: str = None, raw_accumulator: float = None, lineage_id: str = None, standard: str = None):
+    def __init__(self, target_agent: str, contexts: List[str], perceptions: List[dict], text: str, weight: float, parent_hypothesis: 'HypothesisV3' = None, anchor: str = None, particle_id: str = None, raw_accumulator: float = None, lineage_id: str = None, standard: str = None, method: str = None):
         self.target_agent = target_agent
         self.contexts = contexts
         # self.context_history = context_history
@@ -63,6 +63,18 @@ class HypothesisV3():
         # it. Travels WITH the anchor: propagation inherits both, and anything
         # that founds a new root supplies a new one.
         self.standard = standard if standard is not None else (parent_hypothesis.standard if parent_hypothesis is not None else None)
+        # METHOD IS A PROPERTY OF THE COMMITMENT, NOT OF THE TRAJECTORY.
+        # A method is a way of GENERATING a commitment, so a particle that
+        # generated nothing this step used no method:
+        #   generated (seed, split child, mint) -> the method of the call
+        #   inherited (propagate, resample copy, merge survivor) -> unchanged
+        #   revived                             -> the ORIGINAL method, restored
+        #                                          with the original root
+        # Travelling with the anchor rather than the lineage is what makes the
+        # label attributable: the audit asks which method FOUND a commitment,
+        # and a lineage-borne label would credit whichever method seeded the
+        # trajectory a mint later replaced.
+        self.method = method if method is not None else (parent_hypothesis.method if parent_hypothesis is not None else None)
         # Unnormalized accumulated log-weight. The particle's own evidence
         # trajectory; the only series reversals may be counted on.
         self.raw_accumulator = raw_accumulator if raw_accumulator is not None else 0.0
@@ -77,7 +89,7 @@ class HypothesisV3():
             self.standard = new_standard
 
     def update_anchor(self, new_anchor: str, revision: bool = False, founds_root: bool = True,
-                      standard: str = None):
+                      standard: str = None, method: str = None):
         """Set the anchor. A NEW anchor founds a NEW root.
 
         ANCHOR IDENTITY == ROOT IDENTITY. The anchor is the particle's
@@ -100,6 +112,14 @@ class HypothesisV3():
         # keeps the settling condition of the commitment it just replaced.
         if changed:
             self.standard = standard
+            # Deliberately asymmetric with `standard`, which clobbers on None.
+            # A stale settling condition is actively WRONG -- it settles a
+            # commitment the particle no longer holds. A stale method label is
+            # merely uninformative, and revive_retired calls this without
+            # knowing the method, so clobbering would erase the very
+            # provenance revive exists to restore.
+            if method is not None:
+                self.method = method
         if changed and founds_root:
             self.root_id = new_particle_id()
         if revision:
@@ -131,7 +151,7 @@ class HypothesisV3():
         return f"Text: {self.text} Weight: {self.weight}"
 
 class HypothesesSetV3():
-    def __init__(self, target_agent: str, contexts: List[dict], perceptions: List[dict], texts: List[str], weights, parent_hypotheses: List[HypothesisV3] = None, previous_ess: float = None, weight_details: dict = None, anchors: List[str] = None, accumulators: List[float] = None, lineage_ids: List[str] = None, **kwargs):
+    def __init__(self, target_agent: str, contexts: List[dict], perceptions: List[dict], texts: List[str], weights, parent_hypotheses: List[HypothesisV3] = None, previous_ess: float = None, weight_details: dict = None, anchors: List[str] = None, accumulators: List[float] = None, lineage_ids: List[str] = None, methods: List[str] = None, **kwargs):
         self.target_agent = target_agent
         self.contexts = contexts
         self.perceptions = perceptions
@@ -144,12 +164,15 @@ class HypothesesSetV3():
         self.lookahead_scores = kwargs.get('lookahead_scores', None)
         n = len(texts)
         anchors = list(anchors) if anchors is not None else [None] * n
+        methods = list(methods) if methods is not None else [None] * n
         accumulators = list(accumulators) if accumulators is not None else [None] * n
         lineage_ids = list(lineage_ids) if lineage_ids is not None else [None] * n
         if len(lineage_ids) < n:
             lineage_ids = lineage_ids + [None] * (n - len(lineage_ids))
         if len(anchors) < n:
             anchors = anchors + [None] * (n - len(anchors))
+        if len(methods) < n:
+            methods = methods + [None] * (n - len(methods))
         if len(accumulators) < n:
             accumulators = accumulators + [None] * (n - len(accumulators))
         if parent_hypotheses is not None:
@@ -158,14 +181,14 @@ class HypothesesSetV3():
                 parents = parents + [None] * (n - len(parents))
             self.hypotheses = [
                 HypothesisV3(target_agent, contexts, perceptions, text, weight, parent_hypothesis=parent,
-                             anchor=anchor, raw_accumulator=acc, lineage_id=lid)
-                for text, weight, parent, anchor, acc, lid in zip(texts, weights, parents, anchors, accumulators, lineage_ids)
+                             anchor=anchor, raw_accumulator=acc, lineage_id=lid, method=meth)
+                for text, weight, parent, anchor, acc, lid, meth in zip(texts, weights, parents, anchors, accumulators, lineage_ids, methods)
             ]
         else:
             self.hypotheses = [
                 HypothesisV3(target_agent, contexts, perceptions, text, weight, parent_hypothesis=None,
-                             anchor=anchor, raw_accumulator=acc, lineage_id=lid)
-                for text, weight, anchor, acc, lid in zip(texts, weights, anchors, accumulators, lineage_ids)
+                             anchor=anchor, raw_accumulator=acc, lineage_id=lid, method=meth)
+                for text, weight, anchor, acc, lid, meth in zip(texts, weights, anchors, accumulators, lineage_ids, methods)
             ]
         # ANCHOR == ROOT, enforced at founding too. Two founding particles that
         # carry the SAME commitment are one hypothesis explored twice, not two,
@@ -199,6 +222,23 @@ class HypothesesSetV3():
     @property
     def root_ids(self):
         return [h.root_id for h in self.hypotheses]
+
+    @property
+    def methods(self):
+        return [getattr(h, 'method', None) for h in self.hypotheses]
+
+    def update_methods(self, new_methods):
+        """Assign generating methods positionally. Seeding only.
+
+        Set-level assignment is safe at founding because seeding is the one
+        place where the population is built in one go and every particle was
+        genuinely generated. Everywhere else a method arrives with a single
+        commitment, through update_anchor -- which is the choke point that
+        keeps the label in step with the anchor==root invariant.
+        """
+        for hypothesis, method in zip(self.hypotheses, new_methods):
+            if method is not None:
+                hypothesis.method = method
 
     def update_anchors(self, new_anchors, revision: bool = False, founds_root: bool = True):
         self.anchors = list(new_anchors)
@@ -272,6 +312,8 @@ class HypothesesSetV3():
             'root_ids': self.root_ids,
             'parent_ids': [h.parent_id for h in self.hypotheses],
             'anchors': [h.anchor for h in self.hypotheses],
+            'standards': [getattr(h, 'standard', None) for h in self.hypotheses],
+            'methods': self.methods,
             'accumulators': self.accumulators,
         }
 
@@ -381,7 +423,7 @@ def backtrack(hypothesis: HypothesisV3) -> dict:
     """
     trace = {
         'particle_ids': [], 'parent_ids': [], 'texts': [], 'anchors': [],
-        'weights': [], 'accumulators': [], 'operators': [],
+        'methods': [], 'weights': [], 'accumulators': [], 'operators': [],
     }
     seen = set()
     while hypothesis is not None:
@@ -392,6 +434,7 @@ def backtrack(hypothesis: HypothesisV3) -> dict:
         trace['parent_ids'].append(hypothesis.parent_id)
         trace['texts'].append(hypothesis.text)
         trace['anchors'].append(hypothesis.anchor)
+        trace['methods'].append(getattr(hypothesis, 'method', None))
         trace['weights'].append(hypothesis.weight)
         trace['accumulators'].append(hypothesis.raw_accumulator)
         trace['operators'].append(list(getattr(hypothesis, 'operators', [])))

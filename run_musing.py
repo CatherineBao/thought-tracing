@@ -19,6 +19,8 @@ import os
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
+from methods import METHODS, parse_methods
+
 # A run writing far fewer steps than its trajectory has is a FAILURE, not a
 # short run. A flat floor of 5 let a crash at step 7 of a 34-step context pass
 # as success. Require most of the trajectory to have been traced.
@@ -171,6 +173,7 @@ def make_args(**overrides) -> SimpleNamespace:
         infer_motive=False,           # abductive proposer + whole-record role prior
         legacy_form=False,            # restore pre-G2 propagation + no commitment validator
         standard_prompt='v1',         # STANDARD_PROMPTS variant; see eval_motive_sep.py
+        methods=None,                 # methods.py keys; None = default prompts, unchanged
         revive_retired=False,         # expiry becomes a cache: bring a commitment back if it fits
         baseline_blend=0.15,          # uniform mixed back in so a null-level hypothesis survives
         surprise_perturb=False,       # mint when the null outranks every live commitment
@@ -258,6 +261,14 @@ def main():
     ap.add_argument("--chronological", action="store_true",
                     help="interleave the listed sets' turns by timestamp instead of "
                          "concatenating whole sets, so step order matches real time")
+    ap.add_argument("--methods", default=None,
+                    help="comma-separated generation methods from methods.py "
+                         "(round-robin across particles at seeding and across mint "
+                         "events). Several names is the PRIMARY regime: it pairs the "
+                         "comparison within one run. One name is a clean single-method "
+                         "A/B. Unset leaves every prompt exactly as it was.")
+    ap.add_argument("--method", default=None,
+                    help="sugar for --methods with a single name")
     ap.add_argument("--standard-prompt", default="v1",
                     help="which STANDARD_PROMPTS variant the proposer/split/seeder use; "
                          "tuned against eval_motive_sep.py")
@@ -340,6 +351,31 @@ def main():
                          "a guaranteed tie. Selection on a PROCESS property, independent of\n"
                          "the verdicts, so it does not bias which cases come out plausible")
     a = ap.parse_args()
+
+    # Resolve and VALIDATE methods at parse time. method_rule() is tolerant by
+    # design -- an unknown key degrades to the default prompt rather than
+    # raising deep inside a run -- so a typo would otherwise produce a run that
+    # looks like it applied a method for 40 steps without ever having done so.
+    try:
+        a.methods = parse_methods(a.methods or a.method)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    if a.methods:
+        # A method label on a particle with no anchor attaches to nothing
+        # measurable: roots do not canonicalise without the extractor, and
+        # every method-keyed metric in the audit reads `anchor`.
+        a.extract_anchors = True
+        # WARN, do not enable. With the source term off, methods affect seeding
+        # only -- a real experiment, and a cheaper one, but a different one.
+        # Silently switching on 3e would change the population dynamics and
+        # confound the method sweep with the operator.
+        if not a.anchored_perturbation:
+            print("[yellow]--methods without --anchored-perturbation: methods will "
+                  "affect SEEDING only; no minted commitment will carry a method.[/yellow]")
+        needs_prior = [k for k in a.methods if METHODS[k].needs_role_prior]
+        if needs_prior and not a.infer_motive:
+            print(f"[yellow]{', '.join(needs_prior)} read from a role prior that is off; "
+                  f"add --infer-motive or expect them to underperform.[/yellow]")
 
     if a.seed is not None:
         random.seed(a.seed)
@@ -475,6 +511,7 @@ def main():
                      revive_retired=a.revive_retired,
                      legacy_form=a.legacy_form,
                      standard_prompt=a.standard_prompt,
+                     methods=a.methods,
                      baseline_blend=a.baseline_blend,
                      surprise_perturb=a.surprise_perturb,
                      ess_divisor=a.ess_divisor, merge_percentile=a.merge_percentile,
@@ -518,6 +555,9 @@ def main():
             "revive_retired": a.revive_retired,
             "legacy_form": a.legacy_form,
             "standard_prompt": a.standard_prompt,
+            "methods": a.methods,
+            "method_assignment": ("mixed" if a.methods and len(a.methods) > 1
+                                  else ("single" if a.methods else None)),
             "baseline_blend": a.baseline_blend,
             "surprise_perturb": a.surprise_perturb,
             "beta": a.beta,

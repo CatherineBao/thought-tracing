@@ -105,6 +105,14 @@ class ParticleRecord:
     # by string, and so a run can be scored on standard-divergence without
     # re-deriving the axis from vocabulary after the fact.
     standard: Optional[str] = None
+    # Which generation method produced THIS commitment (methods.py), or None on
+    # the default path. Recorded per particle rather than only in run meta
+    # because the primary regime is a MIXED population: several methods seeded
+    # into one run so the comparison between them is paired on target, corpus,
+    # seed and transcript. Run-level meta cannot express that, and a between-run
+    # comparison has to clear a noise floor that eval_motive_sep measured as
+    # being about as wide as the effect.
+    method: Optional[str] = None
     # normalized posterior weight, used for argmax churn
     weight: float = 0.0
     # unnormalized accumulated log-weight: alpha*log w_{t-1} + beta*log L_t.
@@ -185,6 +193,11 @@ class StepRecord:
     # which path fired: 'collapse' (duplicates to break apart) or 'stagnation'
     # (no duplicates, but root-mass has been low for k consecutive steps)
     perturb_path: Optional[str] = None
+    # The method that framed THIS mint call. One method per mint event, not per
+    # candidate: perturbation deliberately generates all k replacements in one
+    # call (independent generation once yielded ~3 distinct ideas out of 7), so
+    # a mint has exactly one frame.
+    perturb_method: Optional[str] = None
     perturb_sustained_steps: Optional[int] = None
     # Phase 4 split trigger, logged as two conditions like 3e's.
     # The ORIGINAL spec (weight > 3x mean AND mid-pack likelihood rank) fires
@@ -238,6 +251,18 @@ class StepRecord:
 
     operators_fired: List[str] = field(default_factory=list)
     anchor_collapses: List[Dict[str, Any]] = field(default_factory=list)
+    # Census of live particles by generating method: {'anomaly': 4, ...}. A
+    # first-class field rather than a derivation over `particles`, for the same
+    # reason distinct_roots is -- a method's share of the population is a time
+    # series, and every reader re-deriving it is a reader that can disagree.
+    methods_alive: Optional[Dict[str, int]] = None
+    # Candidates dropped by valid_commitment, stamped with the method that
+    # produced them. Split and perturb have BOTH collected this detail since
+    # the validator was added and both have dropped it on the floor -- the same
+    # case as weight_details, which was computed every step and never reached
+    # disk. It is the most direct measure of which methods fight the form gate,
+    # and the audit scores it against each method's declared form_risk.
+    rejected_commitments: List[Dict[str, Any]] = field(default_factory=list)
 
     jaccard_matrix: Optional[List[List[float]]] = None
     cosine_matrix: Optional[List[List[float]]] = None

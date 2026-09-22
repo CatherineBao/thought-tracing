@@ -29,6 +29,7 @@ from hypothesis import compute_ess, extract_question, resample_hypotheses_with_o
 import musing_layout
 import trace_log
 from trace_log import StepRecord, ParticleRecord, RunLogger
+from methods import METHODS, method_rule, contributing_methods
 
 
 _ANSWER_PATTERNS = [
@@ -238,6 +239,37 @@ STANDARD_PROMPTS = {
 def standard_rule(target, variant=None):
     v = variant or "v1"
     return STANDARD_PROMPTS.get(v, STANDARD_PROMPTS["v1"]).format(t=target)
+
+
+def standard_block(target, variant=None, method=None):
+    """The STANDARD instructions: the chosen variant, plus any method fragment.
+
+    APPEND, NEVER REPLACE. eval_motive_sep's MODES lexicon was fitted against
+    the register v1-v4 produce, and its own note records that differential
+    binning loss (35% vs 22% unbinned) manufactures separation on its own. A
+    method that replaced this prompt would shift that register differentially
+    BY METHOD, and the sweep would be measuring the lexicon rather than the
+    methods. Appending refines where the evidence comes from while leaving the
+    output contract -- and therefore the binning -- alone.
+
+    Only standard-axis methods contribute here; method_rule enforces that.
+    """
+    return standard_rule(target, variant) + method_rule(method, 'standard', target)
+
+
+def sole_standard_method(method_list):
+    """The one standard-axis method in play, or None if there is not exactly one.
+
+    extract_anchors makes ONE call over ALL seeded texts, so under a mixed
+    population there is no single method whose frame it could honestly carry.
+    Rather than pick arbitrarily -- which would attribute one method's
+    settling conditions to every particle in the run -- the extractor keeps
+    the default STANDARD prompt unless exactly one standard-axis method was
+    selected. A run that wants crystal or signpost measured at the extractor
+    should select it alone.
+    """
+    std = [k for k in (method_list or []) if METHODS[k].axis == 'standard']
+    return std[0] if len(std) == 1 else None
 
 
 def valid_commitment(clause, max_words=COMMITMENT_MAX_WORDS, enabled=True):
@@ -658,6 +690,7 @@ class BaseTracer(ABC):
                 text=texts[i] if i < len(texts) else '',
                 anchor=h.anchor,
                 standard=getattr(h, 'standard', None),
+                method=getattr(h, 'method', None),
                 weight=weights[i] if i < len(weights) else 0.0,
                 raw_accumulator=h.raw_accumulator,
                 likelihood=likes[i] if likes and i < len(likes) else None,
@@ -727,6 +760,9 @@ class BaseTracer(ABC):
                 rec.perturb_sustained_steps = int(perturb_conditions[3])
                 rec.perturb_path = perturb_conditions[4]
         if perturb_info:
+            rec.perturb_method = perturb_info.get('method')
+            if rec.perturb_path is None:
+                rec.perturb_path = perturb_info.get('path')
             acc_idx = perturb_info.get('accepted') or []
             rec.minted_roots = [hypotheses.hypotheses[j].root_id for j in acc_idx
                                 if j < len(hypotheses.hypotheses)]
@@ -777,6 +813,16 @@ class BaseTracer(ABC):
             rec.net_new_roots = split_info.get('net_new_roots')
             for col in (split_info.get('anchor_collapse') or []):
                 rec.anchor_collapses.append(col)
+            rec.rejected_commitments.extend(split_info.get('rejected_commitments') or [])
+        if perturb_info:
+            rec.rejected_commitments.extend(perturb_info.get('rejected_commitments') or [])
+        # Census by generating method, over the live population.
+        if any(p.method for p in rec.particles):
+            census = {}
+            for prec in rec.particles:
+                key = prec.method or '(none)'
+                census[key] = census.get(key, 0) + 1
+            rec.methods_alive = census
         sc, wc, dc = trace_log.split_candidates(rec.particles)
         rec.split_candidates = len(sc)
         rec.split_weight_condition = wc
@@ -1303,16 +1349,51 @@ class Tracer(BaseTracer):
                             f"whole record: {rp} Let the hypotheses follow from that SEAT and "
                             f"STAKE. State the reason the action is worth taking, never a "
                             f"description of what the action accomplishes. ")
-            if action:
-                belief_query = f"{context_input.strip()}{self.assumption}\n\nGenerate a numbered list of {n_hypotheses_str} hypotheses on what were {self.target_agent}'s thoughts (e.g., beliefs, intent) that led to the action above. {axis}Do not add any additional comments."
-            else:
-                belief_query = f"{context_input.strip()}{self.assumption}\n\nGenerate a numbered list of {n_hypotheses_str} hypotheses on what {self.target_agent} will be thinking (e.g., beliefs). {axis}Do not add any additional comments."
-            _hypotheses_list = prompting_for_ordered_list(self.tracer_model, prompt=belief_query, n=self.args.n_hypotheses)
-            hypotheses_list = [hypothesis.strip() for hypothesis in _hypotheses_list]
+            # ONE SEEDING CALL PER METHOD, pooled. Not all twelve frames in one
+            # call: a structured analytic technique works by CONSTRAINING the
+            # frame, and several frames in one context dilute each other to
+            # none. The cost is bounded -- one extra call per method, once, at
+            # step 0, against a run of tens of steps.
+            #
+            # Mixed population is the primary regime. One method per run gives
+            # only BETWEEN-run comparisons, and eval_motive_sep already measured
+            # this corpus's between-run noise floor as about as wide as the
+            # effect being chased -- the same person on two seeds separated
+            # about as far as the two real parties did. Seeding several methods
+            # into ONE run pairs the comparison on target, corpus, seed and
+            # transcript, which is what the per-particle method field is for.
+            mlist = contributing_methods(getattr(self.args, 'methods', None), 'seed')
+            n_total = self.args.n_hypotheses
+            n_per = math.ceil(n_total / len(mlist))
+            per_str = str(n_per) if len(mlist) > 1 else n_hypotheses_str
+            hypotheses_list, seed_methods = [], []
+            for mk in mlist:
+                axis_m = axis + method_rule(mk, 'seed', self.target_agent)
+                if action:
+                    belief_query = f"{context_input.strip()}{self.assumption}\n\nGenerate a numbered list of {per_str} hypotheses on what were {self.target_agent}'s thoughts (e.g., beliefs, intent) that led to the action above. {axis_m}Do not add any additional comments."
+                else:
+                    belief_query = f"{context_input.strip()}{self.assumption}\n\nGenerate a numbered list of {per_str} hypotheses on what {self.target_agent} will be thinking (e.g., beliefs). {axis_m}Do not add any additional comments."
+                _hypotheses_list = prompting_for_ordered_list(self.tracer_model, prompt=belief_query, n=n_per)
+                got = [hypothesis.strip() for hypothesis in _hypotheses_list]
+                hypotheses_list += got
+                seed_methods += [mk] * len(got)
+            # Interleave before truncating to N, so the last method in the list
+            # is not the one that loses every particle to the cap.
+            if len(mlist) > 1:
+                seen, order = {}, []
+                for j, mk in enumerate(seed_methods):
+                    seen[mk] = seen.get(mk, 0) + 1
+                    order.append((seen[mk], mlist.index(mk), j))
+                order.sort()
+                hypotheses_list = [hypotheses_list[j] for _, _, j in order]
+                seed_methods = [seed_methods[j] for _, _, j in order]
+            hypotheses_list = hypotheses_list[:n_total]
+            seed_methods = seed_methods[:n_total]
         else:
             belief_query = f"{context_input}\n\nQuestion: What will {self.target_agent} be thinking now?"
             hypothesis = self.tracer_model.interact(belief_query, temperature=0, max_tokens=1024)
             hypotheses_list = [hypothesis]
+            seed_methods = [None]
 
         weights = np.ones(len(hypotheses_list)) / len(hypotheses_list)
         # Anchor EXTRACTION is instrumentation: it is what canonicalises roots,
@@ -1326,7 +1407,7 @@ class Tracer(BaseTracer):
                         or getattr(self.args, 'use_anchor', False))
         if want_extract and len(hypotheses_list) > 1:
             anchors = self.extract_anchors(hypotheses_list, self.target_agent)
-        initial_hypotheses = HypothesesSetV3(target_agent=self.target_agent, contexts=[state_action], perceptions=[perceptions], texts=hypotheses_list, weights=weights, anchors=anchors)
+        initial_hypotheses = HypothesesSetV3(target_agent=self.target_agent, contexts=[state_action], perceptions=[perceptions], texts=hypotheses_list, weights=weights, anchors=anchors, methods=seed_methods)
         # extract_anchors parks the per-anchor standards on the tracer because
         # it returns a bare list; attach them to the founding particles here.
         for h, sd in zip(initial_hypotheses.hypotheses, getattr(self, '_last_standards', []) or []):
@@ -1585,13 +1666,21 @@ class Tracer(BaseTracer):
         live = [h.anchor for h in hypotheses.hypotheses if h.anchor]
         exclude = "\n".join(f"- {a}" for a in dict.fromkeys(live)) or "- (none)"
         target = hypotheses.target_agent
-        sys_p = (
+        # ONE SYSTEM PROMPT PER SPLITTING PARENT. A child is a refinement of
+        # its parent's commitment, so it is generated under the frame that
+        # produced that commitment -- which is also what keeps `method`
+        # attributable across a split. Free: batch_interact already accepts a
+        # list of system prompts, and split already builds one prompt per
+        # parent.
+        def _split_sys(mth):
+            return (
             f"Refine one account of what {target} wants into {n_children} MORE SPECIFIC and "
             f"MUTUALLY EXCLUSIVE versions.\n\n"
             f"Each must be a genuine refinement of the parent commitment -- not a restatement, "
             f"and not a different commitment altogether. They must be incompatible with each "
             f"other: {target} can hold at most one.\n\n"
             f"Avoid duplicating any commitment already in play:\n{exclude}\n\n"
+            + method_rule(mth, 'split', target) +
             # The frame above ("what {target} wants") was always right; nothing
             # enforced it, so the model answered with the next conversational
             # move instead of an aim. State the form as a rule, the way the
@@ -1603,7 +1692,7 @@ class Tracer(BaseTracer):
             f"- NEVER a description of what {target} says or does. Name the END, not the move.\n"
             f"- At most {COMMITMENT_MAX_WORDS} words. Plain verb phrase, e.g. "
             f"\"Avenge her mother\", \"Earn Katara's trust\".\n\n"
-            + standard_rule(target, getattr(self.args, 'standard_prompt', None)) +
+            + standard_block(target, getattr(self.args, 'standard_prompt', None), mth) +
             f"Children may share an aim and be genuinely exclusive because their "
             f"standards differ.\n\n"
             f"Answer exactly:\n" +
@@ -1613,7 +1702,9 @@ class Tracer(BaseTracer):
         prompts = [f"<parent commitment>\n{hypotheses.hypotheses[i].anchor}\n</parent commitment>\n\n"
                    f"<parent account>\n{hypotheses.hypotheses[i].text}\n</parent account>"
                    for i in idxs]
-        raws = self.tracer_model.batch_interact(prompts, system_prompts=sys_p,
+        parent_methods = [getattr(hypotheses.hypotheses[i], 'method', None) for i in idxs]
+        sys_ps = [_split_sys(m) for m in parent_methods]
+        raws = self.tracer_model.batch_interact(prompts, system_prompts=sys_ps,
                                                 temperature=0.7, max_tokens=1024, stage='split')
 
         texts = list(hypotheses.texts)
@@ -1623,11 +1714,15 @@ class Tracer(BaseTracer):
         parents = list(hypotheses.hypotheses)
         new_anchor_for = {}
         new_standard_for = {}
+        # A child is generated under its parent's frame, so it inherits the
+        # parent's method -- the label follows the commitment, and the child's
+        # commitment came out of that call.
+        new_method_for = {}
         # indices produced by each splitting parent, so the NET outcome can be
         # classified after merge has had its turn on the same step.
         split_groups = {}
 
-        for i, raw in zip(idxs, raws):
+        for i, raw, parent_method in zip(idxs, raws, parent_methods):
             pairs = [(m.group(1).strip(), m.group(2).strip(), (m.group(3) or "").strip())
                      for m in re.finditer(
                          r"COMMITMENT\s*:\s*(.+?)\s*\|\s*BELIEF\s*:\s*(.+?)"
@@ -1640,7 +1735,8 @@ class Tracer(BaseTracer):
                 if ok:
                     kept.append((c, b, sd))
                 else:
-                    info.setdefault('rejected_commitments', []).append({'clause': c, 'reason': why})
+                    info.setdefault('rejected_commitments', []).append(
+                        {'clause': c, 'reason': why, 'method': parent_method, 'site': 'split'})
             pairs = kept
             if len(pairs) < 2:
                 # Splitting into one child is an expand, not a split, and a
@@ -1652,11 +1748,13 @@ class Tracer(BaseTracer):
             texts[i], weights[i], accs[i] = pairs[0][1], share, acc_child
             new_anchor_for[i] = pairs[0][0]
             new_standard_for[i] = pairs[0][2]
+            new_method_for[i] = parent_method
             for c, b, sd in pairs[1:]:
                 texts.append(b); weights.append(share); anchors.append(c)
                 accs.append(acc_child); parents.append(hypotheses.hypotheses[i])
                 new_anchor_for[len(texts) - 1] = c
                 new_standard_for[len(texts) - 1] = sd
+                new_method_for[len(texts) - 1] = parent_method
             split_groups[hypotheses.hypotheses[i].particle_id] = (
                 [i] + list(range(len(texts) - (len(pairs) - 1), len(texts))))
             info['split_fired'] += 1
@@ -1679,6 +1777,11 @@ class Tracer(BaseTracer):
                 # so a child does not inherit the parent's settling condition
                 # for a commitment it no longer holds.
                 out.hypotheses[k].update_standard(new_standard_for.get(k))
+                # Re-asserted after update_anchors(), which founds the new root
+                # without a method argument and would otherwise leave the child
+                # carrying whatever it inherited through the constructor.
+                if new_method_for.get(k) is not None:
+                    out.hypotheses[k].method = new_method_for[k]
                 out.hypotheses[k].note_operator('split')
 
         group_roots = {pid: {out.hypotheses[k].root_id for k in grp
@@ -1783,6 +1886,12 @@ class Tracer(BaseTracer):
         prev = self._retired.get(h.anchor, {})
         self._retired[h.anchor] = {
             'anchor': h.anchor, 'text': getattr(h, 'text', ''), 'root_id': getattr(h, 'root_id', None),
+            # Provenance survives retirement. Without this half a revived
+            # commitment comes back unlabelled and the method census leaks --
+            # the same commitment would be credited to a method on the way out
+            # and to nothing on the way back in.
+            'method': getattr(h, 'method', None),
+            'standard': getattr(h, 'standard', None),
             'peak': max(float(prev.get('peak', 0.0)), float(weight or 0.0)),
             'revivals': int(prev.get('revivals', 0)),
         }
@@ -1851,8 +1960,39 @@ class Tracer(BaseTracer):
                         title="Revived from cache", style="green", box=box.SIMPLE_HEAD))
         return out
 
+    def _mint_method(self, perturb_path=None):
+        """Which method frames THIS mint call, round-robin over the run's list.
+
+        One method per mint EVENT, not per candidate: perturbation generates
+        all k replacements in one call on purpose (independent generation once
+        returned about 3 distinct ideas across 7 slots), so a mint has one
+        frame by construction.
+
+        The needs_action filter is what keeps the label honest. anomaly, ach,
+        devil and premortem all reason from a datum that does not fit, and the
+        only path that puts such a datum in the prompt is the surprise path --
+        everywhere else the action block is absent. Firing anomaly on a
+        stagnation step would stamp a method label on a prompt that never used
+        the method, which is worse for the audit than no label at all. When the
+        filter empties the pool we fall back to the full list rather than skip
+        the mint: diversity repair is the operator's job and must not be
+        blocked by bookkeeping.
+        """
+        # Only methods that actually frame THIS site are eligible. A
+        # standard-axis method contributes nothing here, so choosing it would
+        # mint under the default prompt and label the result with a method that
+        # never ran -- see contributing_methods().
+        ms = [k for k in contributing_methods(
+            getattr(self.args, 'methods', None), 'perturb') if k]
+        if not ms:
+            return None
+        want_action = (perturb_path == 'surprise')
+        pool = [k for k in ms if METHODS[k].needs_action == want_action] or ms
+        self._mint_n = getattr(self, '_mint_n', 0) + 1
+        return pool[(self._mint_n - 1) % len(pool)]
+
     def perturb_anchored(self, hypotheses, idxs, context_and_perception_str=None,
-                         surprising_action=None):
+                         surprising_action=None, perturb_path=None):
         """PHASE 3e: replace a particle's commitment with a genuinely different one.
 
         The ONLY source term in the system. Roots are founded at initialization
@@ -1894,7 +2034,8 @@ class Tracer(BaseTracer):
                 i = idxs.pop(0)
                 h = hypotheses.hypotheses[i]
                 h.update_text(v.get('text') or h.text)
-                h.update_anchor(v['anchor'], revision=True)
+                h.update_anchor(v['anchor'], revision=True,
+                                standard=v.get('standard'), method=v.get('method'))
                 if v.get('root_id'):
                     h.root_id = v['root_id']      # the SAME hypothesis returning
                 h.note_operator('revive')
@@ -1919,6 +2060,13 @@ class Tracer(BaseTracer):
         # to be TRUE for these messages to be worth sending forces a latent cause, and
         # the role prior gives the proposer somewhere to generate from other than the
         # words in front of it.
+        mth = self._mint_method(perturb_path)
+        results['method'] = mth
+        # What the CHOOSER saw. StepRecord.perturb_path is set from the
+        # collapse/stagnation/surprise trigger tuple, which is None on the
+        # expiry path -- so without this an expiry mint logs no path at all
+        # and the needs_action filter's decision cannot be audited.
+        results['path'] = perturb_path
         use_prior = getattr(self.args, 'infer_motive', False)
         prior_block = ""
         if use_prior:
@@ -1938,7 +2086,8 @@ class Tracer(BaseTracer):
             f"You propose {k} ALTERNATIVE accounts of what {target_agent} wants.\n\n"
             f"{ask}{prior_block}\n\n"
             f"Rules:\n"
-            f"- The {k} new commitments must be MUTUALLY EXCLUSIVE WITH EACH OTHER. "
+            + method_rule(mth, 'perturb', target_agent)
+            + f"- The {k} new commitments must be MUTUALLY EXCLUSIVE WITH EACH OTHER. "
             f"{target_agent} can hold at most one. Rewording the same goal is not a "
             f"different goal.\n"
             f"- They must also differ from every commitment already in play:\n{exclude}\n"
@@ -1967,7 +2116,7 @@ class Tracer(BaseTracer):
             # because the real difference (a count is right when it matches
             # what we deliver / when two labellers reproduce it) is a
             # criterion, not a desire.
-            + standard_rule(target_agent, getattr(self.args, 'standard_prompt', None)) +
+            + standard_block(target_agent, getattr(self.args, 'standard_prompt', None), mth) +
             f"\n"
             f"Answer exactly {k} numbered lines:\n" +
             "\n".join(f"{j+1}. COMMITMENT: <short clause> | BELIEF: <one or two sentences> "
@@ -2007,7 +2156,7 @@ class Tracer(BaseTracer):
             ok, why = valid_commitment(c, enabled=not getattr(self.args,'legacy_form',False))
             if not ok:
                 results.setdefault('rejected_commitments', []).append(
-                    {'clause': c.strip(), 'reason': why})
+                    {'clause': c.strip(), 'reason': why, 'method': mth, 'site': 'perturb'})
                 continue
             if key and key not in seen_c:
                 seen_c.add(key)
@@ -2078,7 +2227,7 @@ class Tracer(BaseTracer):
             # unmeasurable. Split is deliberately not a revision -- its children
             # are new hypotheses, not a changed mind.
             # the standard travels with the commitment it settles
-            h.update_anchor(commitment, revision=True, standard=standard)
+            h.update_anchor(commitment, revision=True, standard=standard, method=mth)
             h.note_operator('perturb')
             results['accepted'].append(i)
         # REBIRTH AT FAIR SHARE. A replacement inherited the weight of the
@@ -2153,7 +2302,8 @@ class Tracer(BaseTracer):
             # report showing zero discrepancies between the dashboard's ratios
             # and the sensor logs"), so the difference is the instruction, not
             # the model. Name the failure explicitly and demand an artefact.
-            + standard_rule(target_agent, getattr(self.args, 'standard_prompt', None)) +
+            + standard_block(target_agent, getattr(self.args, 'standard_prompt', None),
+                             sole_standard_method(getattr(self.args, 'methods', None))) +
             f"  Name who would produce it and what it would show. Two hypotheses may "
             f"share a goal and differ ONLY here.\n\n"
             f"Output exactly {n} lines:\n1. <clause> | STANDARD: <what would settle it>\n"
@@ -2899,7 +3049,8 @@ class Tracer(BaseTracer):
                                 # thing that triggered it. Pass it explicitly.
                                 res = self.perturb_anchored(
                                     new_hypotheses, idxs, prop_ctx if idx > 0 else None,
-                                    surprising_action=(state_action.get('action') if surprise_cond else None))
+                                    surprising_action=(state_action.get('action') if surprise_cond else None),
+                                    perturb_path=perturb_conditions[4])
                                 operators.append('perturb')
                                 perturb_info = res
                                 new_hypotheses, _cap, _bound = self.enforce_population_cap(new_hypotheses)
@@ -2921,7 +3072,8 @@ class Tracer(BaseTracer):
                                 f"for {exp_info['expiry_steps']} consecutive turns: retiring",
                                 title="Expiry", style="yellow", box=box.SIMPLE_HEAD))
                             res = self.perturb_anchored(new_hypotheses, dead,
-                                                        prop_ctx if idx > 0 else None)
+                                                        prop_ctx if idx > 0 else None,
+                                                        perturb_path='expiry')
                             operators.append('expire')
                             if perturb_info is None:
                                 perturb_info = res
