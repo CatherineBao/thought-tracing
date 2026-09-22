@@ -224,6 +224,8 @@ def make_args(**overrides) -> SimpleNamespace:
         expiry_weight_frac=0.5,
         expiry_steps=6,
         merge_percentile=95.0,        # Phase 4 merge cut, resolved per run (jaccard)
+        merge_anchors=False,          # also merge particles whose COMMITMENTS are one aim
+        merge_floor=0.40,             # absolute similarity floor; see MERGE_ABSOLUTE_FLOOR
         anchor_max_tokens=4096,       # thinking models spend this before writing
     )
     args.update(overrides)
@@ -356,6 +358,16 @@ def main():
     ap.add_argument("--split-children", type=int, default=2)
     ap.add_argument("--protect-leader", type=int, default=1,
                     help="copies of each root kept safe from perturbation (0 = old behaviour)")
+    ap.add_argument("--merge-anchors", action="store_true",
+                    help="also absorb particles whose COMMITMENTS are the same aim, "
+                         "not just whose belief prose is similar. Lexical overlap "
+                         "picks candidates; one batched call per merge step decides, "
+                         "because no threshold separates 'Avenge her mother' from "
+                         "'Forgive her mother's killer'.")
+    ap.add_argument("--merge-floor", type=float, default=0.40,
+                    help="absolute text-Jaccard floor under the merge percentile. "
+                         "0.0 restores the pre-fix behaviour, where the percentile "
+                         "alone merged the top pair on 100%% of steps.")
     ap.add_argument("--merge-percentile", type=float, default=95.0)
     ap.add_argument("--rebirth-at-fair-share", action="store_true", default=False,
                     help="mints enter at 1/n instead of inheriting the replaced particle's "
@@ -566,6 +578,7 @@ def main():
                      baseline_blend=a.baseline_blend,
                      surprise_perturb=a.surprise_perturb,
                      ess_divisor=a.ess_divisor, merge_percentile=a.merge_percentile,
+                     merge_anchors=a.merge_anchors, merge_floor=a.merge_floor,
                      stagnation_steps=a.stagnation_steps,
                      enable_split=a.enable_split,
                      split_weight_quantile=a.split_weight_quantile,
@@ -629,6 +642,8 @@ def main():
             "expiry_steps": a.expiry_steps,
             "enable_split": a.enable_split,
             "merge_percentile": a.merge_percentile,
+            "merge_anchors": a.merge_anchors,
+            "merge_floor": a.merge_floor,
             # self-describing runs: the evaluator reconstructs the judge window
             # from these rather than re-deriving selection, which is how four
             # earlier evaluations produced invalid numbers.

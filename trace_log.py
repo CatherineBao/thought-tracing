@@ -256,6 +256,10 @@ class StepRecord:
     # reason distinct_roots is -- a method's share of the population is a time
     # series, and every reader re-deriving it is a reader that can disagree.
     methods_alive: Optional[Dict[str, int]] = None
+    # Particles absorbed by the step-level anchor dedup (--merge-anchors),
+    # counted separately from merged_count because that one is split's sink and
+    # only moves when split fires.
+    anchor_merges: Optional[int] = None
     # Candidates dropped by valid_commitment, stamped with the method that
     # produced them. Split and perturb have BOTH collected this detail since
     # the validator was added and both have dropped it on the floor -- the same

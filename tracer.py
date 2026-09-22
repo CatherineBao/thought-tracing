@@ -87,6 +87,45 @@ def extract_answer_span(response: str):
 # Rejecting is safe here in a way that guessing is not: a dropped child means
 # one fewer split, while a bad anchor founds a root and persists.
 COMMITMENT_MAX_WORDS = 8
+
+# Function words to ignore when testing two COMMITMENT CLAUSES for lexical
+# overlap. Deliberately small and local: this is not a general stopword list,
+# it is the set of words that carry no aim in a 2-8 word verb phrase. Kept here
+# rather than imported from restatement.py, which is a no-LLM analysis script
+# and must not become a dependency of the filter.
+# Absolute floor under the merge threshold, on text Jaccard.
+#
+# WHY A FLOOR IS NEEDED AT ALL. resolve_merge_threshold returns a PERCENTILE of
+# this step's own pairwise distribution, and a percentile is itself a value in
+# that distribution, so `>= thr` always selects at least the top pair. Measured
+# over 1198 logged steps: merge_similar absorbs at least one particle on 100%
+# of the steps it runs, however dissimilar the most-similar pair happens to be.
+# The percentile controls a RATE; it cannot answer "is this pair actually
+# alike". The floor is what makes merge able to do nothing.
+#
+# CALIBRATION, from 22k logged pairs, using the commitment as ground truth for
+# "same hypothesis" (anchor == root identity):
+#
+#   known-SAME  (identical commitment)  n=181    median 0.397
+#   known-DIFF  (different commitment)  n=22160  median 0.208, p90 0.365
+#
+#   floor   same-commitment kept   different-commitment admitted
+#   0.30           66%                     20.4%
+#   0.35           61%                     11.9%
+#   0.40           49%                      6.9%
+#   0.45           41%                      4.0%
+#
+# 0.40 sits just above the different-commitment p90. The classes overlap badly
+# -- every hypothesis here is about one agent in one scene in similar prose --
+# so no floor separates them cleanly, and the choice follows the asymmetry
+# already recorded in resolve_merge_threshold: in a system whose dominant
+# failure is decay, a false merge costs far more than a missed one.
+MERGE_ABSOLUTE_FLOOR = 0.40
+
+ANCHOR_STOP = set(
+    "a an the and or of to for from with by in on at into over about "
+    "her his their its them they she he him own self more again another "
+    "be being been is are was were get getting make making".split())
 _BAD_COMMITMENT_VERB = re.compile(
     r"^\s*\**\s*(ask|asks|asking|prompt|prompts|inquire|inquires|question|questions|"
     r"tell|tells|request|requests|demand|demands|urge|urges|get|have|make)\b", re.I)
@@ -681,7 +720,7 @@ class BaseTracer(ABC):
         self.run_logger = run_logger
         return run_logger
 
-    def _log_step(self, idx, hypotheses, weight_results, operators, likelihood_ess=None, ess_value=None, likelihood_ess_norm=None, accum_info=None, state_action=None, pre_snapshot=None, perturb_info=None, perturb_conditions=None, cap_info=None, split_info=None, expiry_info=None):
+    def _log_step(self, idx, hypotheses, weight_results, operators, likelihood_ess=None, ess_value=None, likelihood_ess_norm=None, accum_info=None, state_action=None, pre_snapshot=None, perturb_info=None, perturb_conditions=None, cap_info=None, split_info=None, expiry_info=None, dedup_info=None):
         """Emit one StepRecord. Instrumentation only -- never alters the filter."""
         if self.run_logger is None:
             trace_log.RECORDER.drain()
@@ -832,6 +871,9 @@ class BaseTracer(ABC):
             rec.net_new_roots = split_info.get('net_new_roots')
             for col in (split_info.get('anchor_collapse') or []):
                 rec.anchor_collapses.append(col)
+        if dedup_info:
+            rec.anchor_merges = int(dedup_info[0])
+            rec.anchor_collapses.extend(dedup_info[1])
             rec.rejected_commitments.extend(split_info.get('rejected_commitments') or [])
         if perturb_info:
             rec.rejected_commitments.extend(perturb_info.get('rejected_commitments') or [])
@@ -1875,10 +1917,160 @@ class Tracer(BaseTracer):
         info['net_new_roots'] = len(live - {h.root_id for h in hypotheses.hypotheses})
         return out, info
 
+    ANCHOR_CANDIDATE_OVERLAP = 0.34
+
+    def merge_equivalent_anchors(self, hypotheses, already):
+        """Anchor pairs a model judges to be ONE aim. Returns {drop: keep}.
+
+        Lexical overlap generates candidates only -- see merge_similar for the
+        measurement showing it cannot decide them. The containment coefficient
+        is used rather than Jaccard because these clauses are 2-5 words and
+        differ in length ("Avenge her mother" vs "Punish her mother's
+        killer"), which Jaccard punishes for the wrong reason.
+        """
+        hyps = hypotheses.hypotheses
+        n = len(hyps)
+        target = hypotheses.target_agent
+
+        def content(a):
+            # Possessives have to be normalised or the pairs this exists for
+            # never even become candidates: "Avenge her mother" and "Punish her
+            # mother's killer" share nothing until "mother's" -> "mother".
+            out = set()
+            for w in re.findall(r"[A-Za-z][\w']*", (a or '').lower()):
+                w = re.sub(r"'s$", "", w).strip("'")
+                if w and w not in ANCHOR_STOP:
+                    out.add(w)
+            return out
+
+        # EVERY qualifying pair, not one per particle. A duplicate FAMILY is the
+        # case this exists for -- four spellings of revenge on one trace -- and
+        # allowing each particle into a single pair collapses such a family one
+        # step at a time, while merge only runs when split fires. Transitivity
+        # is handled at application time and by the chain walk in merge_similar.
+        out, ask = {}, []
+        for i in range(n):
+            if i in already:
+                continue
+            for j in range(i + 1, n):
+                if j in already:
+                    continue
+                # NEVER WITHIN A ROOT. Resampling encodes the posterior in
+                # MULTIPLICITY -- a root holding three copies at 0.1 carries
+                # 0.3 -- so collapsing a root's own duplicates does not remove
+                # redundancy, it deletes the representation of that
+                # hypothesis's mass. Measured: on the first live run this
+                # absorbed 5 of 8 particles at step 0, all of them copies of
+                # one seeded commitment that canonicalisation had already made
+                # one root. The target is two ROOTS that are secretly one
+                # hypothesis; two particles of one root are the resampler
+                # working correctly.
+                if hyps[i].root_id == hyps[j].root_id:
+                    continue
+                ai, aj = hyps[i].anchor, hyps[j].anchor
+                if not ai or not aj:
+                    continue
+                if ai.strip().lower() == aj.strip().lower():
+                    # same clause, different roots: the anchor==root invariant
+                    # says these should never have been two roots. No call
+                    # needed -- the strings settle it.
+                    keep, drop = ((i, j) if float(hypotheses.weights[i]) >= float(hypotheses.weights[j])
+                                  else (j, i))
+                    out[drop] = keep
+                    continue
+                A, B = content(ai), content(aj)
+                if not A or not B:
+                    continue
+                if len(A & B) / min(len(A), len(B)) >= self.ANCHOR_CANDIDATE_OVERLAP:
+                    ask.append((i, j))
+        # Bound the prompt. Heaviest pairs first, so if the cap binds it is the
+        # negligible particles that keep their own root for another step.
+        cap = int(getattr(self.args, 'merge_anchor_max_pairs', 24))
+        if len(ask) > cap:
+            ask.sort(key=lambda p: -(float(hypotheses.weights[p[0]])
+                                     + float(hypotheses.weights[p[1]])))
+            ask = ask[:cap]
+        if not ask:
+            return out
+
+        sys_p = (
+            f"Decide whether two stated aims of {target}'s are THE SAME AIM or "
+            f"DIFFERENT AIMS.\n\n"
+            f"SAME means one person holding one is thereby holding the other -- "
+            f"the same goal in different words.\n"
+            f"DIFFERENT means {target} could hold one and not the other.\n\n"
+            f"Rules:\n"
+            f"- OPPOSED aims are DIFFERENT, however similar the wording. "
+            f"\"Avenge her mother\" and \"Forgive her mother's killer\" share "
+            f"most of their words and are opposites; answer DIFFERENT.\n"
+            f"- Aims that share a SUBJECT but not a GOAL are DIFFERENT. "
+            f"\"Master her own power\" and \"Dismantle the Fire Nation's power\" "
+            f"are about power and are not the same aim.\n"
+            f"- A narrower aim and a broader one are DIFFERENT if {target} could "
+            f"pursue the broader without the narrower.\n"
+            f"- When genuinely unsure, answer DIFFERENT. Wrongly merging two aims "
+            f"destroys a hypothesis; wrongly keeping two costs one particle.\n\n"
+            f"Answer one line each, nothing else:\n1: SAME or DIFFERENT\n...")
+        block = "\n".join(f"{k+1}. A: {hyps[i].anchor}  |  B: {hyps[j].anchor}"
+                           for k, (i, j) in enumerate(ask))
+        raw = self.tracer_model.interact(
+            f"<pairs>\n{block}\n</pairs>", system_prompt=sys_p,
+            temperature=0, max_tokens=512, stage='merge')
+        verdicts = {int(m.group(1)): m.group(2).upper() for m in re.finditer(
+            r"^\s*\**\s*(\d+)\s*\**\s*[:.\)]\s*\**\s*(SAME|DIFFERENT)",
+            raw or "", re.I | re.M)}
+        # Apply heaviest-first so a family collapses INTO its leader rather
+        # than into whichever member happened to be compared first.
+        verdict_pairs = [(k, ij) for k, ij in enumerate(ask, start=1)
+                         if verdicts.get(k) == 'SAME']   # unparsed => DIFFERENT
+        verdict_pairs.sort(key=lambda kp: -max(float(hypotheses.weights[kp[1][0]]),
+                                               float(hypotheses.weights[kp[1][1]])))
+        for _, (i, j) in verdict_pairs:
+            keep, drop = ((i, j) if float(hypotheses.weights[i]) >= float(hypotheses.weights[j])
+                          else (j, i))
+            if drop in out or keep in out:
+                # already spoken for; the chain walk in merge_similar resolves
+                # who ultimately receives the mass
+                if drop in out:
+                    continue
+            out[drop] = keep
+        return out
+
     def merge_similar(self, hypotheses):
-        """Absorb near-duplicate particles. Threshold is a Jaccard percentile
-        resolved from THIS step's own pairwise distribution -- a fixed cosine
-        0.90 absorbed 26 of 34 known-DIFFERENT pairs on this data."""
+        """Absorb near-duplicate particles.
+
+        TWO SIGNALS, deliberately different in kind.
+
+        TEXT (always on). Threshold is a Jaccard percentile resolved from THIS
+        step's own pairwise distribution -- a fixed cosine 0.90 absorbed 26 of
+        34 known-DIFFERENT pairs on this data. Note what a percentile means: it
+        merges roughly the top (100-pct)% of pairs whether or not they are
+        actually alike, so it cannot respond to a population that has become
+        genuinely duplicated.
+
+        ANCHOR (--merge-anchors). Text similarity misses the duplication that
+        matters, because the ANCHOR is the root's identity: "Avenge her
+        mother", "Punish her mother's killer", "Confront her mother's killer"
+        and "Seek justice for her mother" ran as four roots on one baseline
+        trace, splitting the mass of one hypothesis four ways and inflating
+        every diversity count that reads roots.
+
+        WHY THE ANCHOR PATH NEEDS A MODEL AND NOT A THRESHOLD. Measured on
+        those clauses, lexical similarity cannot tell "same aim" from
+        "opposite aim":
+
+            Avenge her mother / Punish her mother's killer   jaccard 0.17
+            Avenge her mother / Forgive her mother's killer  jaccard 0.17
+            Execute Yon Rha   / Forgive Yon Rha personally   jaccard 0.40
+
+        The opposite pairs score at or above the same-idea pairs, because the
+        words that differ are the whole disagreement. A lexical anchor merge
+        would therefore absorb forgiveness into revenge -- destroying exactly
+        the commitment this corpus is documented as never reaching. So lexical
+        overlap is used only as a cheap high-recall CANDIDATE GENERATOR, and
+        one batched call decides. Merge runs only when split fires (~9 times a
+        run), so that is ~9 extra calls.
+        """
         hyps = hypotheses.hypotheses
         n = len(hyps)
         if n < 3:
@@ -1887,14 +2079,36 @@ class Tracer(BaseTracer):
                  for i in range(n) for j in range(i + 1, n)]
         pct = float(getattr(self.args, 'merge_percentile', 95.0))
         thr = trace_log.resolve_merge_threshold(pairs, pct)
-        if thr is None:
+        # A percentile lands ON a value, and `>=` then takes every pair tied
+        # with it. When the whole distribution is one value the threshold IS
+        # that value and every pair qualifies -- at thr=0.0, i.e. a population
+        # sharing no content words at all, merge absorbs everything into one
+        # particle. Real belief prose always shares some vocabulary so this has
+        # not fired in a live run, but the failure is total when it does, and
+        # the cost of the guard is nothing.
+        if thr is None or thr <= 0:
             return hypotheses, 0, []
-        absorbed, collapses = set(), []
+        # The percentile sets the RATE; the floor decides whether anything is
+        # actually alike enough to merge. Without it merge fires every step.
+        thr = max(thr, float(getattr(self.args, 'merge_floor', MERGE_ABSOLUTE_FLOOR)))
+        # absorbed_by maps dropped -> survivor. Previously this was a bare set
+        # and the weight loop re-tested every survivor against every absorbed
+        # particle, so a particle similar to TWO survivors had its weight added
+        # to both -- mass created out of nothing, then normalised away, which
+        # silently tilts the posterior toward whatever sat near a duplicate.
+        absorbed_by, collapses = {}, []
         for i in range(n):
-            if i in absorbed:
+            if i in absorbed_by:
                 continue
             for j in range(i + 1, n):
-                if j in absorbed:
+                if j in absorbed_by:
+                    continue
+                # Same rule as the anchor path: multiplicity within a root IS
+                # that hypothesis's mass, so absorbing a root's own copies
+                # deletes the posterior rather than a duplicate. Only 2% of the
+                # pairs this loop would take share a root, but those 2% are
+                # the resampler's work being undone.
+                if hyps[i].root_id == hyps[j].root_id:
                     continue
                 if jaccard_similarity(hyps[i].text, hyps[j].text) >= thr:
                     keep, drop = (i, j) if float(hypotheses.weights[i]) >= float(hypotheses.weights[j]) else (j, i)
@@ -1902,17 +2116,44 @@ class Tracer(BaseTracer):
                     # not hold. Record it; do not silently discard one.
                     if hyps[keep].anchor != hyps[drop].anchor:
                         collapses.append({'kept': hyps[keep].anchor, 'lost': hyps[drop].anchor})
-                    absorbed.add(drop)
+                    absorbed_by[drop] = keep
+
+        if getattr(self.args, 'merge_anchors', False):
+            for drop, keep in self.merge_equivalent_anchors(
+                    hypotheses, absorbed_by).items():
+                collapses.append({'kept': hyps[keep].anchor,
+                                  'lost': hyps[drop].anchor, 'by': 'anchor'})
+                absorbed_by[drop] = keep
+
+        return self.absorb(hypotheses, absorbed_by, collapses)
+
+    def absorb(self, hypotheses, absorbed_by, collapses=None, reason='merge'):
+        """Rebuild the population with `absorbed_by` ({drop: keep}) applied.
+
+        Shared by the text merge and the step-level anchor dedup so the mass
+        bookkeeping exists once. Each absorbed particle's weight goes to
+        exactly ONE survivor, following chains, so total mass is conserved
+        before normalisation.
+        """
+        hyps = hypotheses.hypotheses
+        n = len(hyps)
+        absorbed = set(absorbed_by)
         if not absorbed:
-            return hypotheses, 0, []
+            return hypotheses, 0, (collapses or [])
         keep_idx = [i for i in range(n) if i not in absorbed]
-        for i in absorbed:                      # absorbed commitments leave the population
-            self.retire(hyps[i], hypotheses.weights[i])
-        w = []
-        for i in keep_idx:
-            extra = sum(float(hypotheses.weights[j]) for j in absorbed
-                        if jaccard_similarity(hyps[i].text, hyps[j].text) >= thr)
-            w.append(float(hypotheses.weights[i]) + extra)
+        if not keep_idx:                 # defensive: never empty the population
+            return hypotheses, 0, (collapses or [])
+        for i in absorbed:               # absorbed commitments leave the population
+            self.retire(hyps[i], hypotheses.weights[i], reason=reason)
+        gained = {i: 0.0 for i in keep_idx}
+        for drop, keep in absorbed_by.items():
+            seen = {drop}
+            while keep in absorbed_by and keep not in seen:   # chains a->b->c
+                seen.add(keep)
+                keep = absorbed_by[keep]
+            if keep in gained:
+                gained[keep] += float(hypotheses.weights[drop])
+        w = [float(hypotheses.weights[i]) + gained[i] for i in keep_idx]
         tot = sum(w) or 1.0
         w = [x / tot for x in w]
         out = HypothesesSetV3(hypotheses.target_agent, hypotheses.contexts, hypotheses.perceptions,
@@ -1923,9 +2164,35 @@ class Tracer(BaseTracer):
         for dst, i in zip(out.hypotheses, keep_idx):
             dst.root_id = hyps[i].root_id          # survivor keeps its root
             dst.note_operator('merge')
-        return out, len(absorbed), collapses
+        return out, len(absorbed), (collapses or [])
 
-    def retire(self, h, weight=0.0):
+    def dedupe_anchors(self, hypotheses):
+        """Step-level pass: absorb particles whose COMMITMENTS are one aim.
+
+        Separate from merge_similar because that one is split's sink and runs
+        only when split fires -- 3 times in a 41-step run, which is why an
+        anchor merge gated behind it never fired at all. Deduplication is not
+        a sink for anything; it is a property the population should have on
+        every step, so it runs on every step.
+
+        No percentile here. merge_similar's threshold is relative and always
+        takes the most-similar pair whether or not the pair is alike; this pass
+        merges only what a model calls the same aim, so it can do nothing on a
+        population that has no duplicates, which is the correct behaviour.
+        """
+        if not getattr(self.args, 'merge_anchors', False):
+            return hypotheses, 0, []
+        if len(hypotheses.hypotheses) < 2:
+            return hypotheses, 0, []
+        pairs = self.merge_equivalent_anchors(hypotheses, already={})
+        if not pairs:
+            return hypotheses, 0, []
+        hyps = hypotheses.hypotheses
+        collapses = [{'kept': hyps[k].anchor, 'lost': hyps[d].anchor, 'by': 'anchor'}
+                     for d, k in pairs.items()]
+        return self.absorb(hypotheses, pairs, collapses, reason='dedupe')
+
+    def retire(self, h, weight=0.0, reason=None):
         """Remember a commitment that is leaving the population.
 
         Called from every path a hypothesis can exit by, not just expiry. That
@@ -2929,6 +3196,7 @@ class Tracer(BaseTracer):
             cap_info = None
             expiry_info = None
             split_info = None
+            dedup_info = None
             pre_snapshot = []
             ess = None
             if state_action['action']:
@@ -2977,6 +3245,20 @@ class Tracer(BaseTracer):
                     #
                     # Diversity is measured AFTER resampling now, so the post-resample
                     # collapse is visible rather than hidden behind the pre-resample read.
+                    # DEDUP, every step and independent of split. merge_similar
+                    # is split's sink and only runs when split fires, so a
+                    # population can carry four spellings of one commitment for
+                    # a whole trace without either ever being compared.
+                    if getattr(self.args, 'merge_anchors', False):
+                        new_hypotheses, _nd, _dcol = self.dedupe_anchors(new_hypotheses)
+                        if _nd:
+                            print(Panel("\n".join(f"{c['lost']}  ->  {c['kept']}"
+                                                  for c in _dcol),
+                                        title=f"Same aim: absorbed {_nd}",
+                                        style="cyan", box=box.SIMPLE_HEAD))
+                            operators.append('merge')
+                            dedup_info = (_nd, _dcol)
+                            self.sync_accumulator(new_hypotheses)
                     # PHASE 4: split (source) then merge (sink) in the SAME step.
                     if getattr(self.args, 'enable_split', False):
                         new_hypotheses, _sm = self.split_and_merge(new_hypotheses, prop_ctx)
@@ -3157,7 +3439,8 @@ class Tracer(BaseTracer):
                            accum_info=accum_info, state_action=state_action,
                            pre_snapshot=pre_snapshot, perturb_info=perturb_info,
                            perturb_conditions=perturb_conditions, cap_info=cap_info,
-                           split_info=split_info, expiry_info=expiry_info)
+                           split_info=split_info, expiry_info=expiry_info,
+                           dedup_info=dedup_info)
             hypotheses_list.append(new_hypotheses)
 
             # update history

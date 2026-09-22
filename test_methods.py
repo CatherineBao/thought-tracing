@@ -165,6 +165,19 @@ def test_mint_chooser_never_picks_a_non_contributing_method():
     assert _Chooser(['signpost', 'crystal'])._mint_method('surprise') is None
 
 
+def test_emphasis_is_stripped_before_a_commitment_is_stored():
+    # the anchor is the root's identity and is compared BY STRING, so the same
+    # commitment with and without emphasis founded two roots and split its mass
+    n = tracer.normalize_commitment
+    assert n("**Forgive Yon Rha**") == "Forgive Yon Rha"
+    assert n("  Forgive   Yon  Rha ") == "Forgive Yon Rha"
+    assert n("Forgive Yon Rha") == "Forgive Yon Rha"
+    assert n("") == "" and n(None) is None
+    # and what the validator accepts is what gets stored
+    ok, _ = tracer.valid_commitment("**Avenge her mother**")
+    assert ok and n("**Avenge her mother**") == "Avenge her mother"
+
+
 # --------------------------------------------------------------------------
 # the inheritance rule
 # --------------------------------------------------------------------------
@@ -310,6 +323,152 @@ def test_split_children_carry_the_parent_method():
     sysp = t.tracer_model.systems[0] or ""
     assert 'anomaly detection' in sysp, "split prompt lost the parent's frame"
     assert "devil's advocate" not in sysp, "split prompt used the run list, not the parent"
+
+
+# --------------------------------------------------------------------------
+# merge
+# --------------------------------------------------------------------------
+
+def _merge_tracer(**over):
+    t = tracer.Tracer.__new__(tracer.Tracer)
+    cfg = dict(merge_percentile=95.0, merge_anchors=False,
+               n_hypotheses=8, retired_cap=40)
+    cfg.update(over)
+    t.args = types.SimpleNamespace(**cfg)
+    t._retired = {}
+    return t
+
+
+def test_merge_conserves_mass_when_one_particle_matches_two_survivors():
+    # the weight loop used to re-test every survivor against every absorbed
+    # particle, so a particle similar to TWO survivors was counted twice --
+    # mass invented, then normalised away, tilting the posterior
+    t = _merge_tracer()
+    txt = "Katara wants to protect her brother from the fire nation soldiers"
+    s = HypothesesSetV3('Katara', [], [], [txt, txt, txt, 'something wholly other'],
+                        np.array([0.4, 0.3, 0.2, 0.1]),
+                        anchors=['A', 'B', 'C', 'D'])
+    out, merged, _ = tracer.Tracer.merge_similar(t, s)
+    assert merged >= 1
+    assert abs(float(np.sum(out.weights)) - 1.0) < 1e-9
+    # the survivor of the duplicate family must hold the family's whole mass,
+    # and the unrelated particle must be untouched
+    by_anchor = {h.anchor: float(w) for h, w in zip(out.hypotheses, out.weights)}
+    assert abs(by_anchor.get('D', 0) - 0.1) < 1e-9, by_anchor
+
+
+def test_anchor_merge_is_off_by_default():
+    t = _merge_tracer()
+    called = []
+    t.merge_equivalent_anchors = lambda *a, **k: called.append(1) or {}
+    s = _set(4, methods=[None] * 4)
+    tracer.Tracer.merge_similar(t, s)
+    assert not called, "anchor merge must not run unless --merge-anchors is set"
+
+
+def _anchor_set(anchors, weights):
+    return HypothesesSetV3('Katara', [], [],
+                           [f'belief prose number {k}' for k in range(len(anchors))],
+                           np.array(weights), anchors=anchors)
+
+
+def test_adjudicator_merges_the_same_aim_and_spares_the_opposite():
+    """The load-bearing test. Lexical similarity rates
+
+        Avenge her mother / Punish her mother's killer   (same)      0.17
+        Avenge her mother / Forgive her mother's killer  (opposite)  0.17
+
+    identically, so the candidate generator must offer BOTH and the model must
+    separate them. Merging the opposite pair would delete the one commitment
+    this corpus is documented as never reaching.
+    """
+    t = _merge_tracer(merge_anchors=True)
+    asked = {}
+
+    class _M:
+        def interact(self, prompt, **kw):
+            out = []
+            for ln in prompt.splitlines():
+                if '|' not in ln or not ln.strip()[0].isdigit():
+                    continue
+                n = ln.split('.')[0].strip()
+                asked[n] = ln
+                out.append(f"{n}: " + ("DIFFERENT" if 'Forgive' in ln else "SAME"))
+            return "\n".join(out)
+    t.tracer_model = _M()
+
+    s = _anchor_set(['Avenge her mother', "Punish her mother's killer",
+                     "Forgive her mother's killer", 'Preserve her peace of mind'],
+                    [0.4, 0.3, 0.2, 0.1])
+    got = tracer.Tracer.merge_equivalent_anchors(t, s, already={})
+
+    pairs = " ".join(asked.values())
+    assert 'Punish' in pairs and 'Forgive' in pairs, \
+        "both lookalikes must be offered for adjudication"
+    assert 'Preserve her peace of mind' not in pairs, \
+        "an unrelated aim must not even be a candidate"
+    # index 1 (Punish) absorbed into 0 (Avenge, heavier); Forgive untouched
+    assert got.get(1) == 0, got
+    assert 2 not in got, "the opposite aim was merged away"
+    assert 3 not in got
+
+
+def test_adjudicator_defaults_to_different_when_the_verdict_is_unparsed():
+    # wrongly merging destroys a hypothesis; wrongly keeping costs one particle
+    t = _merge_tracer(merge_anchors=True)
+    t.tracer_model = types.SimpleNamespace(
+        interact=lambda *a, **k: "the model rambled and gave no verdicts")
+    s = _anchor_set(['Avenge her mother', "Punish her mother's killer"], [0.6, 0.4])
+    assert tracer.Tracer.merge_equivalent_anchors(t, s, already={}) == {}
+
+
+def test_adjudicator_skips_particles_text_merge_already_took():
+    t = _merge_tracer(merge_anchors=True)
+    t.tracer_model = types.SimpleNamespace(
+        interact=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("nothing left to ask about")))
+    s = _anchor_set(['Avenge her mother', "Punish her mother's killer"], [0.6, 0.4])
+    assert tracer.Tracer.merge_equivalent_anchors(t, s, already={1: 0}) == {}
+
+
+def test_identical_anchors_in_DIFFERENT_roots_merge_without_asking():
+    # the anchor==root invariant says one clause is one root, so two roots
+    # carrying the same string should never have existed; the strings settle
+    # it and spending a call to confirm would be waste
+    t = _merge_tracer(merge_anchors=True)
+    t.tracer_model = types.SimpleNamespace(
+        interact=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not call the model for identical clauses")))
+    s = _anchor_set(['Avenge her mother', 'Avenge her mother',
+                     'Preserve her peace of mind'], [0.5, 0.3, 0.2])
+    # canonicalisation gives the two identical clauses one root at founding;
+    # force them apart to represent two roots that drifted onto one clause
+    s.hypotheses[1].root_id = 'a-separate-root'
+    got = tracer.Tracer.merge_equivalent_anchors(t, s, already={})
+    assert got == {1: 0}, got
+
+
+def test_dedup_never_collapses_a_root_s_own_multiplicity():
+    """Resampling encodes the posterior in multiplicity.
+
+    A root holding three copies at 0.1 carries 0.3. Merging its copies does
+    not remove redundancy -- it deletes the representation of that
+    hypothesis's mass, and the heaviest hypothesis loses the most. Measured
+    before this guard: 5 of 8 particles absorbed at step 0, every one of them
+    a copy of a single seeded commitment.
+    """
+    t = _merge_tracer(merge_anchors=True)
+    t.tracer_model = types.SimpleNamespace(
+        interact=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("a root's own copies must never be adjudicated")))
+    s = _anchor_set(['Understand Zuko\'s actions and intentions'] * 3
+                    + ['Preserve her peace of mind'], [0.3, 0.3, 0.3, 0.1])
+    # founding canonicalisation already puts the three identical clauses in
+    # one root; assert that, then assert dedup leaves them alone
+    assert len({h.root_id for h in s.hypotheses[:3]}) == 1
+    assert tracer.Tracer.merge_equivalent_anchors(t, s, already={}) == {}
+    out, merged, _ = tracer.Tracer.dedupe_anchors(t, s)
+    assert merged == 0 and len(out.hypotheses) == 4
 
 
 # --------------------------------------------------------------------------
