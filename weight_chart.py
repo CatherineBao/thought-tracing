@@ -4,7 +4,7 @@ One line per lineage. A split forks the parent line into its children; a merge
 joins two lines; a perturbation ends one line and starts another (the commitment
 was replaced, so it is genuinely a different hypothesis from that turn on).
 """
-import argparse, glob, html, sys
+import argparse, glob, html, json, sys
 import musing_layout as ml
 import trace_log as t
 
@@ -116,14 +116,40 @@ def build(st):
     return series, parent_of, born, detail, removed
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("run")
-    ap.add_argument("--out", default=None)
-    a = ap.parse_args()
-    fs = ml.find(f"{a.run}*.steps.jsonl")
+def _meta(run):
+    """The run's own meta row, for a panel heading that says which prior it got.
+
+    On a merged page the panels differ only by the prior they were seeded
+    with, so a heading that names the target and not the prior would make
+    three different experiments look like three views of one.
+    """
+    try:
+        rows = [json.loads(l) for l in open("musing_out/meta/runs.jsonl", encoding="utf-8") if l.strip()]
+    except OSError:
+        return {}
+    for r in reversed(rows):
+        if str(r.get("run_id", "")).startswith(run):
+            return r
+    return {}
+
+
+def prior_label(m):
+    """One phrase naming the prior this run was seeded with."""
+    if m.get("character_profile"):
+        who, traced = m.get("profile_target"), m.get("target_agent")
+        if m.get("profile_scrambled"):
+            return f"external profile of {who} \u2014 SCRAMBLED, traced as {traced}"
+        return f"external profile of {who}"
+    if m.get("infer_motive"):
+        return "role prior inferred from this transcript"
+    return "no prior"
+
+
+def render_run(run):
+    """One run -> its svg and commitments table. None if it is not on disk."""
+    fs = ml.find(f"{run}*.steps.jsonl")
     if not fs:
-        sys.exit(f"no steps for {a.run}")
+        return None
     st = t.read_steps(fs[0])
     n = len(st)
     series, parent_of, born, detail, removed = build(st)
@@ -220,10 +246,42 @@ def main():
         f'<td>{seen[l][0]}</td><td>{html.escape(seen[l][1][:74])}</td></tr>'
         for l in lids if l in seen)
 
+    m = _meta(run)
+    return {
+        "run": run, "n": n, "lids": lids,
+        "target": m.get("target_agent") or run,
+        "prior": prior_label(m),
+        "svg": "".join(o), "rows": rows,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("runs", nargs="+",
+                    help="one or more run ids. Several are stacked into ONE page, "
+                         "sharing the legend and tooltip, so the charts can be read "
+                         "against each other instead of in separate tabs.")
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--title", default="Hypothesis weight by turn")
+    ap.add_argument("--blurb", default=None,
+                    help="one line under the title, e.g. what varies between panels")
+    a = ap.parse_args()
+
+    panels, missing = [], []
+    for run in a.runs:
+        p = render_run(run)
+        (panels if p else missing).append(p or run)
+    if missing:
+        print(f"no steps for: {', '.join(missing)}")
+    if not panels:
+        sys.exit("nothing to draw")
+
     css = """:root{--bg:#fbfbfd;--fg:#1b1d22;--mut:#6b7280;--line:#dde0e6;--card:#fff}
 @media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#131519;--fg:#e9ebef;--mut:#98a0ad;--line:#2b303a;--card:#1b1e24}}
 body{margin:0;padding:0 18px 50px;background:var(--bg);color:var(--fg);font:15px/1.6 ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 .wrap{max-width:980px;margin:0 auto}h1{font-size:22px;margin:26px 0 4px}p{color:var(--mut)}
+h2{font-size:17px;margin:34px 0 0;padding-top:18px;border-top:1px solid var(--line)}
+h2 .pr{font-weight:400;font-size:14px;color:var(--mut)}
 svg{width:100%;height:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;margin:10px 0}
 .g{stroke:var(--line);stroke-width:1}.tk{fill:var(--mut);font-size:10px}
 .lb{font-size:11px;font-weight:700}.op{stroke:var(--fg);opacity:.18;stroke-dasharray:3 3}
@@ -268,21 +326,34 @@ document.querySelectorAll('.hit').forEach(el=>{
   el.addEventListener('mouseleave',()=>tip.style.opacity=0);
 });
     """
-    out = a.out or ml.run_path(a.run, f"{a.run}_weights.html", create=True)
+    body = []
+    for p in panels:
+        # Heading per panel. With one run this is the same information the
+        # old single-run page carried in its subtitle; with several it is the
+        # only thing distinguishing them.
+        if len(panels) > 1:
+            body.append(f'<h2>{html.escape(p["target"])} <span class="pr">&middot; {html.escape(p["prior"])}</span></h2>')
+        body.append(f'<svg viewBox="0 0 {W} {Y0+H+34}">{p["svg"]}</svg>')
+        body.append('<p class="k">commitments, with the turn they first appear</p>')
+        body.append(f'<table>{p["rows"]}</table>')
+
+    out = a.out or ml.run_path(a.runs[0], f"{a.runs[0]}_weights.html", create=True)
+    blurb = a.blurb or ("Each line is one hypothesis \u2014 one commitment about what the agent wants \u2014 and its share of belief mass at each turn.")
     open(out, "w", encoding="utf-8").write(
         f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'<title>Hypothesis weights</title><style>{css}</style></head><body><div class="wrap">'
-        f'<h1>Hypothesis weight by turn</h1>'
-        f'<p>Each line is one hypothesis &mdash; one commitment about what the agent wants '
-        f'&mdash; and its share of belief mass at each turn.</p>'
+        f'<title>{html.escape(a.title)}</title><style>{css}</style></head>'
+        f'<body><div class="wrap">'
+        f'<h1>{html.escape(a.title)}</h1>'
+        f'<p>{blurb}</p>'
         f'{LEGEND}'
-        f'<svg viewBox="0 0 {W} {Y0+H+34}">{"".join(o)}</svg>'
+        f'{"".join(body)}'
         f'<div id="tip"></div>'
-        f'<script>{JS}</script>' 
-        f'<p class="k">commitments, with the turn they first appear</p>'
-        f'<table>{rows}</table></div></body></html>')
-    print(f"wrote {out}  ({n} turns, {len(lids)} hypothesis lines)")
+        f'<script>{JS}</script>'
+        f'</div></body></html>')
+    for p in panels:
+        print(f"  {p['run']:<26}{p['n']:>3} turns, {len(p['lids']):>3} hypothesis lines")
+    print(f"wrote {out}")
 
 
 if __name__ == "__main__":

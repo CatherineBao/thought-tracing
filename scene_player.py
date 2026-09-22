@@ -280,14 +280,39 @@ def role_prior(run_id):
 
     Paraphrasing it into the page would put a caption next to the numbers that
     no run produced. If the log is not there the board simply shows no role.
+
+    TWO SOURCES, LABELLED APART. `Role prior` is inferred from this transcript
+    by the run itself; `Character profile` is an external record the run was
+    handed before it read anything (see profiles.py). They occupy the same slot
+    on the board and licence completely different readings of it -- one is the
+    filter's own work, the other is an input -- so the card names which it got.
+    A scrambled run is marked too: its card is describing somebody else, and a
+    reader comparing boards has to be able to see that.
     """
     path = f"musing_out/{run_id}.log"
     if not os.path.exists(path):
         return ""
     txt = re.sub(r"\x1b\[[0-9;]*m", "", open(path, errors="replace").read()[:4000])
     m = re.search(r"Role prior.*?\n(.*?)\n\s*\n", txt, re.S)
+    kind = "Inferred from this transcript"
     if not m:
-        return ""
+        h = re.search(r"Character profile \(external\)\s+\u2014\s*(.*?)\n(.*?)\n\s*\n",
+                      txt, re.S)
+        if not h:
+            return ""
+        who = norm(h.group(1))
+        kind = ("External profile \u2014 " +
+                (f"{who}" if " AS " not in who else f"{who}"))
+        m = h
+        body = norm(" ".join(l.strip() for l in h.group(2).splitlines()))
+        parts = re.split(r"\b(SEAT|STAKE|PRESSURE|STANCE|STANDING):\s*", body)
+        d = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
+        out = [kind + "."]
+        if d.get("STAKE"):
+            out.append("Stake: " + d["STAKE"].rstrip(". ") + ".")
+        if d.get("PRESSURE"):
+            out.append("Pressure: " + d["PRESSURE"].rstrip(". ") + ".")
+        return " ".join(out)
     body = norm(" ".join(l.strip() for l in m.group(1).splitlines()))
     parts = re.split(r"\b(SEAT|STAKE|PRESSURE):\s*", body)
     d = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}

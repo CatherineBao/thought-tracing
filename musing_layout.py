@@ -31,6 +31,7 @@ _FAMILIES = (
     ("atla",        ("t_atla", "atla_")),
     ("oppenheimer", ("t_strauss", "vs_")),
     ("ab",          ("ab_", "ab")),
+    ("profiles",    ("prof_",)),
     ("tuning",      ("lpd", "lp", "sys", "rm", "exp_")),
     ("eval",        ("q_", "q", "fb_", "fb", "gc_", "gc", "demo",
                      "quality", "gate", "probe")),
