@@ -132,6 +132,114 @@ def test_rebirth_is_a_noop_when_nothing_was_accepted():
     assert all(abs(a - b) < 1e-12 for a, b in zip(before, after))
 
 
+# --- the retirement cache -------------------------------------------------
+#
+# These call the REAL retire/_finish_perturb rather than a local copy of the
+# arithmetic, because every bug they cover was a bug of plumbing -- a counter
+# that was never incremented, a return that skipped the tail -- and a
+# reimplementation in the test would have reproduced the plumbing faithfully
+# and the bug with it.
+
+def cache_tr(**kw):
+    t = Tracer.__new__(Tracer)
+    flags = dict(retired_cap=40, rebirth_at_fair_share=False, revival_rebirth=False)
+    flags.update(kw)
+    t.args = SimpleNamespace(**flags)
+    t._retired = {}
+    t._revival_counts = {}
+    return t
+
+
+def test_retirement_records_the_exit_path():
+    t = cache_tr()
+    s = mk(3)
+    t.retire(s.hypotheses[0], 0.4, reason='surprise')
+    t.retire(s.hypotheses[1], 0.1, reason='expiry')
+    assert t._retired['a0']['reason'] == 'surprise'
+    assert t._retired['a1']['reason'] == 'expiry'
+    # an untagged call must not silently claim a path
+    t.retire(s.hypotheses[2], 0.2)
+    assert t._retired['a2']['reason'] is None
+
+
+def test_revival_count_survives_the_pop_that_a_revival_performs():
+    """The bug: 'revivals' lived on the cache entry, which revival deletes.
+
+    retire() re-initialised it from `prev`, prev was {} because the entry had
+    just been popped, and the field therefore read 0 for every anchor no matter
+    how many times it had oscillated -- which is the one failure mode the null
+    gate on revival exists to prevent.
+    """
+    t = cache_tr()
+    s = mk(1)
+    h = s.hypotheses[0]
+    t.retire(h, 0.4, reason='expiry')
+    t._retired.pop('a0')                      # what revive_retired does
+    t._revival_counts['a0'] = 1               # ...and what it now also does
+    t.retire(h, 0.2, reason='surprise')
+    assert t._retired['a0']['revivals'] == 1, t._retired['a0']
+    t._retired.pop('a0'); t._revival_counts['a0'] = 2
+    t.retire(h, 0.2, reason='surprise')
+    assert t._retired['a0']['revivals'] == 2, "oscillation still invisible"
+
+
+def test_peak_is_the_high_water_mark_across_retirements():
+    t = cache_tr()
+    s = mk(1)
+    t.retire(s.hypotheses[0], 0.62, reason='expiry')
+    t.retire(s.hypotheses[0], 0.03, reason='merge')
+    assert t._retired['a0']['peak'] == 0.62
+
+
+def _finish(weights, accepted, revived_idx=(), **flags):
+    """Drive the REAL tail of perturb_anchored."""
+    t = cache_tr(**flags)
+    s = mk(len(weights))
+    s.update_weights(np.array(weights, dtype=float))
+    for i in revived_idx:                     # a revived particle changed text
+        s.hypotheses[i].text = f"revived-{i}"
+    before = [float(x) for x in s.weights]
+    res = {'accepted': list(accepted),
+           'revived': [{'index': i} for i in revived_idx]}
+    t._finish_perturb(s, res)
+    return before, [float(x) for x in s.weights], res, s
+
+
+def test_revival_rebirth_lifts_revivals_and_leaves_plain_mints_alone():
+    # index 0 was revived, index 1 was minted; only 0 should move
+    before, after, res, _ = _finish([0.02, 0.02, 0.30, 0.66], accepted=[0, 1],
+                                    revived_idx=[0], revival_rebirth=True)
+    assert res['reborn'] == [0], res
+    assert after[0] > 5 * before[0], after
+    # the mint keeps its inherited floor weight, only rescaled by the same
+    # factor as every other survivor
+    assert abs((after[1] / after[2]) - (before[1] / before[2])) < 1e-9
+    assert abs(sum(after) - 1.0) < 1e-9
+
+
+def test_the_two_rebirth_flags_are_independent():
+    _, _, res, _ = _finish([0.02, 0.02, 0.96], accepted=[0, 1], revived_idx=[0],
+                           rebirth_at_fair_share=True)
+    assert res['reborn'] == [0, 1], "mint rebirth must cover every accepted mint"
+    _, after, res, _ = _finish([0.02, 0.02, 0.96], accepted=[0, 1], revived_idx=[0])
+    assert 'reborn' not in res and 'mass_moved_by_rebirth' not in res
+    assert abs(after[0] - 0.02) < 1e-9, "neither flag set: nothing moves"
+
+
+def test_the_revival_return_resyncs_the_stored_text_list():
+    """The bug: revival could fill every slot and return before the resync.
+
+    hypotheses.texts is a stored list, not a view over hypotheses[i].text, and
+    propagate() reads the LIST while enforce_population_cap() rebuilds a
+    particle from the list's text and the object's anchor. Returning early
+    therefore sent the REPLACED commitment into the next step's prompt.
+    """
+    _, _, _, s = _finish([0.25] * 4, accepted=[0], revived_idx=[0])
+    assert s.texts[0] == 'revived-0', s.texts
+    assert s.texts == [h.text for h in s.hypotheses]
+    assert s.anchors == [h.anchor for h in s.hypotheses]
+
+
 if __name__ == "__main__":
     for nm, fn in sorted(globals().items()):
         if nm.startswith("test_"):

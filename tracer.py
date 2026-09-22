@@ -574,6 +574,15 @@ class BaseTracer(ABC):
         # comes back is the SAME hypothesis returning rather than a new one that
         # happens to read alike.
         self._retired = {}
+        # Revival census, keyed by anchor and deliberately OUTSIDE _retired.
+        # A revived commitment is POPPED from the cache, so a counter stored in
+        # the cache entry is re-initialised to 0 the next time that anchor is
+        # retired and can never record a second revival -- the field read 0
+        # everywhere. An anchor that keeps coming back IS the oscillator the
+        # null gate on revival exists to prevent, so it is the one thing about
+        # revival that has to be measurable. Kept outside the cap eviction too,
+        # for the same reason.
+        self._revival_counts = {}
 
     def accumulate(self, hypotheses, likelihood):
         """w_t proportional to w_{t-1}^alpha * L_t^beta, with a floor.
@@ -668,7 +677,7 @@ class BaseTracer(ABC):
         # commitment that once led and then faded is a far better revival
         # candidate than one that never got off the floor.
         for j in weak:
-            self.retire(hypotheses.hypotheses[j], hypotheses.weights[j])
+            self.retire(hypotheses.hypotheses[j], hypotheses.weights[j], reason='expiry')
         return weak, {'expiry_threshold': thr, 'expiry_steps': k,
                       'expiry_weight_condition': n_below,
                       'expiry_duration_condition': len(weak),
@@ -821,6 +830,10 @@ class BaseTracer(ABC):
             rec.perturb_method = perturb_info.get('method')
             if rec.perturb_path is None:
                 rec.perturb_path = perturb_info.get('path')
+            rec.revived = list(perturb_info.get('revived') or [])
+            rec.mass_moved_by_rebirth = perturb_info.get('mass_moved_by_rebirth')
+            rec.rebirth_weight = perturb_info.get('rebirth_weight')
+            rec.reborn = perturb_info.get('reborn')
             acc_idx = perturb_info.get('accepted') or []
             rec.minted_roots = [hypotheses.hypotheses[j].root_id for j in acc_idx
                                 if j < len(hypotheses.hypotheses)]
@@ -839,6 +852,7 @@ class BaseTracer(ABC):
         if pre_snapshot:
             rec.pre_operator_particles = list(pre_snapshot)
             rec.weights_pre = [p['weight'] for p in pre_snapshot]
+        rec.retired_pool = len(getattr(self, '_retired', {}) or {})
         rec.top_to_median_ratio = trace_log.top_to_median_ratio(weights)
         rec.population_pre = rec.population_post = len(particles)
         rec.operators_fired = list(operators)
@@ -2204,11 +2218,22 @@ class Tracer(BaseTracer):
         Keyed by anchor, holding PEAK weight -- a commitment that once led and
         faded is a better revival candidate than one that never left the floor.
 
+        `reason` is the exit path. Without it the pool cannot answer the
+        question that decides whether revival earns its call -- which path
+        produces commitments worth bringing back. The paths are not
+        interchangeable: expiry and merge retire the weak and the redundant,
+        but the surprise path retires whatever was CHEAPEST TO SPEND at a
+        moment when the null beat every commitment, so what it parks is
+        orthogonal-to-now rather than refuted, which is exactly the profile
+        revival was built for.
+
         Defensive about the attribute because several call sites build a Tracer
         without running the full __init__ (test_expiry.py among them).
         """
         if not hasattr(self, '_retired'):
             self._retired = {}
+        if not hasattr(self, '_revival_counts'):
+            self._revival_counts = {}
         if not getattr(h, 'anchor', None):
             return
         prev = self._retired.get(h.anchor, {})
@@ -2221,7 +2246,13 @@ class Tracer(BaseTracer):
             'method': getattr(h, 'method', None),
             'standard': getattr(h, 'standard', None),
             'peak': max(float(prev.get('peak', 0.0)), float(weight or 0.0)),
-            'revivals': int(prev.get('revivals', 0)),
+            'reason': reason,
+            'step': getattr(self, '_step_idx', None),
+            # Take the census value, not just the cache entry's: the entry is
+            # gone after a revival, and it is the anchors that keep returning
+            # that the number is for.
+            'revivals': max(int(prev.get('revivals', 0)),
+                            int(self._revival_counts.get(h.anchor, 0))),
         }
         # Bounded: the pool is scored on revival, so an unbounded one would grow
         # the prompt without bound. Keep the strongest.
@@ -2276,16 +2307,27 @@ class Tracer(BaseTracer):
         winners = [(float(scores[i]) - baseline, pool[i]) for i in range(n)
                    if float(scores[i]) > baseline]
         winners.sort(key=lambda t: -t[0])
+        if not hasattr(self, '_revival_counts'):
+            self._revival_counts = {}
         out = []
         for margin, v in winners[:k]:
             v = dict(v)
             v['margin'] = margin
+            # Count it in the census, which survives the pop below. A second or
+            # third revival of the same anchor is the retire/revive oscillation
+            # the null gate is supposed to make impossible; if it is happening,
+            # this is the only place it becomes visible.
+            self._revival_counts[v['anchor']] = self._revival_counts.get(v['anchor'], 0) + 1
+            v['revivals'] = self._revival_counts[v['anchor']]
             out.append(v)
             self._retired.pop(v['anchor'], None)
         if out:
-            print(Panel("\n".join(f"{v['anchor']}  (peak {v['peak']:.2f}, margin +{v['margin']:.0f})"
-                                  for v in out),
-                        title="Revived from cache", style="green", box=box.SIMPLE_HEAD))
+            print(Panel("\n".join(
+                f"{v['anchor']}  (peak {v['peak']:.2f}, margin +{v['margin']:.0f}"
+                + (f", revival #{v['revivals']}" if v.get('revivals', 1) > 1 else "")
+                + (f", retired by {v['reason']}" if v.get('reason') else "") + ")"
+                for v in out),
+                title="Revived from cache", style="green", box=box.SIMPLE_HEAD))
         return out
 
     def _mint_method(self, perturb_path=None):
@@ -2318,6 +2360,115 @@ class Tracer(BaseTracer):
         pool = [k for k in ms if METHODS[k].needs_action == want_action] or ms
         self._mint_n = getattr(self, '_mint_n', 0) + 1
         return pool[(self._mint_n - 1) % len(pool)]
+
+    def _finish_perturb(self, hypotheses, results):
+        """Common tail for EVERY exit from perturb_anchored.
+
+        Two things have to happen however the function returns, and the revival
+        early-return used to do neither.
+
+        1. RESYNC. `hypotheses.texts` and `.anchors` are stored lists, not views
+           over hypotheses[i].text -- and propagate() reads the LISTS, while
+           enforce_population_cap() rebuilds a particle from the list's text and
+           the object's anchor. Returning without resyncing therefore sends the
+           REPLACED commitment into the next step's prompt, and under the cap
+           pairs an old text with a new anchor. Only the revival path can take
+           that early return, so the bug was invisible until revival filled
+           every slot -- which is the common case, since revival runs first and
+           k is half the slots.
+
+        2. REBIRTH AT FAIR SHARE. A replacement inherited the weight of the
+           particle it replaced, and the expiry/collapse triggers select exactly
+           the particles sitting at the floor -- so every minted commitment was
+           born at ~eps and had to climb 8x just to reach parity. Measured on
+           exp_3: median birth mass 0.028 for perturbation's mints against 0.189
+           for split's children, 15 of 27 born below fair share. Under
+           w_t ~ w_{t-1}^alpha * L_t^beta a floor-level prior cannot recover
+           quickly however well the new commitment scores, so root-mass never
+           recovered, the trigger stayed hot, and the operator re-fired on
+           consecutive steps chasing a collapse its own mechanism guaranteed.
+
+           MEASURED NET-NEGATIVE FOR MINTS, SO --rebirth-at-fair-share IS OFF BY
+           DEFAULT. exp_4 vs exp_3 did raise median birth mass 0.047 -> 0.113 as
+           intended, but the mass has to come from the established hypotheses,
+           which lowers root-mass ESS across the population and trips the
+           collapse trigger MORE often: 9 -> 13 firings, 3 -> 6 consecutive
+           re-fires, mint survival 59% -> 32%, argmax churn 8 -> 5. The reasoning
+           that floor-born mints kept the trigger hot was wrong -- the fix fed
+           the loop it was meant to break. Kept behind the flag as the evidence.
+
+           --revival-rebirth is the SEPARATE cell: the same reset, revived
+           particles only. exp_4 rebirthed every accepted mint, of which
+           revivals are a small minority, and its stated rationale does not
+           cover them: "a new claim that has not yet
+           been tested" is the opposite of a revived one, which was tested and
+           earned mass on evidence that has not been retracted. That is what the
+           cache stores `peak` FOR, and peak is currently read only for pool
+           ranking and eviction, never for reinstatement. The volume differs by
+           an order of magnitude too -- at most k = len(idxs)//2 particles on
+           surprise steps only -- so the mass transfer that sank exp_4 applies
+           at a fraction of the scale. Fair share, NOT peak: peak is a
+           high-water mark under a ~6.7x amplifier, and reinstating there would
+           let one ranking call restore a hypothesis to its best-ever standing.
+
+           MEASURED, AND STILL OFF BY DEFAULT -- because it buys nothing, not
+           because it costs anything. bb_Rodriguez, the 74-set span, 80 steps,
+           n=8, two seeds per arm (--seed fixes resampling but not the model, so
+           the arms carry sampler noise and two seeds bound it rather than
+           removing it):
+
+             birth/fair   0.61 0.77  ->  0.94 0.95   the flag does its job
+             root-mass    0.775 0.806 -> 0.759 0.837  arm STRADDLES control
+             mint/fair    0.68 0.81  ->  0.40 0.66   both arm seeds below both
+             survive      0.31 0.73  ->  0.53 0.78   straddles
+             churn        50 42      ->  35 44       straddles
+             re-fire      3 3        ->  3 5         straddles
+
+           The volume argument HELD: exp_4's actual failure -- root-mass ESS
+           falling and the collapse trigger re-firing on consecutive steps --
+           does not reproduce at ~1 particle per surprise step. So this is not
+           exp_4 again in miniature, which is what testing the cell separately
+           was for. But nothing improves either: survival and churn straddle the
+           control on both seeds. The only cost signal is mints being born
+           lighter, and while both arm seeds sit below both control seeds, that
+           ordering arises by chance one run in six at two seeds a side.
+
+           The premise was also weaker than it looked. Revived particles were
+           never born at the floor: measured 0.61-0.77 of fair share, not the
+           ~0.12 the exp_3 note describes, because the population decays 8 -> 4-5
+           over a run (which makes fair share large and the eps floor small) and
+           a surprise step flattens the likelihood to uniform. The flag corrects
+           a ~30% handicap, not an 8x one.
+
+        Deliberate, logged mass move -- NOT asserted on, same class as the
+        floor. sync_accumulator() re-keys the prior from these weights, so the
+        reset reaches the accumulator and is not undone on the next step.
+        """
+        rb_all = bool(getattr(self.args, 'rebirth_at_fair_share', False))
+        rb_rev = bool(getattr(self.args, 'revival_rebirth', False))
+        reborn = set(results['accepted']) if rb_all else set()
+        if rb_rev:
+            reborn |= {r['index'] for r in results.get('revived') or []}
+        if reborn:
+            before = [float(x) for x in hypotheses.weights]
+            n = len(before)
+            if n:
+                fair = 1.0 / n
+                w = list(before)
+                for i in reborn:
+                    if i < n:
+                        w[i] = fair
+                tot = sum(w)
+                if tot > 0:
+                    w = [x / tot for x in w]
+                    hypotheses.update_weights(np.array(w, dtype=float))
+                    results['mass_moved_by_rebirth'] = round(
+                        0.5 * sum(abs(a - b) for a, b in zip(w, before)), 5)
+                    results['rebirth_weight'] = round(fair, 5)
+                    results['reborn'] = sorted(reborn)
+        hypotheses.texts = [h.text for h in hypotheses.hypotheses]
+        hypotheses.anchors = [h.anchor for h in hypotheses.hypotheses]
+        return results
 
     def perturb_anchored(self, hypotheses, idxs, context_and_perception_str=None,
                          surprising_action=None, perturb_path=None):
@@ -2368,10 +2519,13 @@ class Tracer(BaseTracer):
                     h.root_id = v['root_id']      # the SAME hypothesis returning
                 h.note_operator('revive')
                 results['revived'].append({'index': i, 'anchor': v['anchor'],
-                                           'peak': v.get('peak'), 'margin': v.get('margin')})
+                                           'peak': v.get('peak'), 'margin': v.get('margin'),
+                                           'revivals': v.get('revivals'),
+                                           'retired_by': v.get('reason'),
+                                           'retired_step': v.get('step')})
                 results['accepted'].append(i)
             if not idxs:
-                return results
+                return self._finish_perturb(hypotheses, results)
 
         exclude = "\n".join(f"- {a}" for a in dict.fromkeys(live)) or "- (none recorded)"
         k = len(idxs)
@@ -2547,7 +2701,10 @@ class Tracer(BaseTracer):
                 results['rejected'].append(i)
                 continue
             h = hypotheses.hypotheses[i]
-            self.retire(h, hypotheses.weights[i])    # the commitment being replaced
+            # the commitment being replaced, tagged with the path that replaced
+            # it -- 'surprise' parks what this moment had no use for, which is a
+            # different kind of candidate from what expiry and merge park.
+            self.retire(h, hypotheses.weights[i], reason=perturb_path or 'perturb')
             h.update_text(belief)
             # revision=True: this REPLACES a live particle's commitment, which is
             # what anchor_revisions is meant to count. Nothing passed it before,
@@ -2558,52 +2715,7 @@ class Tracer(BaseTracer):
             h.update_anchor(commitment, revision=True, standard=standard, method=mth)
             h.note_operator('perturb')
             results['accepted'].append(i)
-        # REBIRTH AT FAIR SHARE. A replacement inherited the weight of the
-        # particle it replaced, and the expiry/collapse triggers select exactly
-        # the particles sitting at the floor -- so every minted commitment was
-        # born at ~eps and had to climb 8x just to reach parity. Measured on
-        # exp_3: median birth mass 0.028 for perturbation's mints against 0.189
-        # for split's children, 15 of 27 born below fair share. Under
-        # w_t ~ w_{t-1}^alpha * L_t^beta a floor-level prior cannot recover
-        # quickly however well the new commitment scores, so root-mass never
-        # recovered, the trigger stayed hot, and the operator re-fired on
-        # consecutive steps chasing a collapse its own mechanism guaranteed.
-        #
-        # A new hypothesis is not a weak version of the old one -- it is a new
-        # claim that has not yet been tested. It enters at fair share, and the
-        # mass comes proportionally from the rest of the population.
-        #
-        # MEASURED NET-NEGATIVE, SO THIS IS OFF BY DEFAULT. exp_4 vs exp_3 did
-        # raise median birth mass 0.047 -> 0.113 as intended, but the mass has to
-        # come from the established hypotheses, which lowers root-mass ESS across
-        # the population and trips the collapse trigger MORE often: 9 -> 13
-        # firings, 3 -> 6 consecutive re-fires, mint survival 59% -> 32%, argmax
-        # churn 8 -> 5. The reasoning that floor-born mints kept the trigger hot
-        # was wrong -- the fix fed the loop it was meant to break. Kept behind the
-        # flag as the evidence.
-        #
-        # Deliberate, logged mass move -- NOT asserted on, same class as the
-        # floor. sync_accumulator() re-keys the prior from these weights, so the
-        # reset reaches the accumulator and is not undone on the next step.
-        if results['accepted'] and getattr(self.args, 'rebirth_at_fair_share', False):
-            before = [float(x) for x in hypotheses.weights]
-            n = len(before)
-            if n:
-                fair = 1.0 / n
-                w = list(before)
-                for i in results['accepted']:
-                    if i < n:
-                        w[i] = fair
-                tot = sum(w)
-                if tot > 0:
-                    w = [x / tot for x in w]
-                    hypotheses.update_weights(np.array(w, dtype=float))
-                    results['mass_moved_by_rebirth'] = round(
-                        0.5 * sum(abs(a - b) for a, b in zip(w, before)), 5)
-                    results['rebirth_weight'] = round(fair, 5)
-        hypotheses.texts = [h.text for h in hypotheses.hypotheses]
-        hypotheses.anchors = [h.anchor for h in hypotheses.hypotheses]
-        return results
+        return self._finish_perturb(hypotheses, results)
 
     def extract_anchors(self, hypotheses_texts, target_agent=None):
         """One call: distil each hypothesis to its distinguishing commitment.
@@ -3174,9 +3286,13 @@ class Tracer(BaseTracer):
         context_history = []
         self._accum = {}   # accumulated prior is per-trace
         self._retired = {}
+        self._revival_counts = {}
         self._low_mass_run = 0
         self._weak_run = {}
         for idx, (state_action, perceptions) in enumerate(zip(trajectory, perceptions_trajectory)):
+            # retire() stamps this on the cache entry, so a revived commitment
+            # can report how long it sat out.
+            self._step_idx = idx
             prop_ctx = None
             if idx == 0:
                 new_hypotheses = self.initialize(state_action=state_action, perceptions=perceptions)

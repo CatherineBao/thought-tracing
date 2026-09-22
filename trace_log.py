@@ -199,6 +199,24 @@ class StepRecord:
     # a mint has exactly one frame.
     perturb_method: Optional[str] = None
     perturb_sustained_steps: Optional[int] = None
+    # REVIVAL. Which cached commitments came back and where they came from.
+    # `revivals` is how many times that anchor has now returned: anything above
+    # 1 is the retire/revive oscillation the null gate on revival is supposed to
+    # make impossible, and this is the only place it becomes visible. Before
+    # this the counter existed on the cache entry, was never incremented, and
+    # was reset by the very pop that a revival performs -- it read 0 everywhere.
+    # `retired_by` is the exit path that stocked the entry, which is the only
+    # way to tell whether the cache is worth its ranking call: expiry and merge
+    # park the weak and the redundant, the surprise path parks whatever was
+    # cheapest to spend at a moment when the null beat everything.
+    revived: List[Dict[str, Any]] = field(default_factory=list)
+    retired_pool: Optional[int] = None
+    # Mass the rebirth reset moved. Computed since exp_3 and never written to
+    # disk -- same class of miss as weight_details, which was recomputed every
+    # step and never reached a file.
+    mass_moved_by_rebirth: Optional[float] = None
+    rebirth_weight: Optional[float] = None
+    reborn: Optional[List[int]] = None
     # Phase 4 split trigger, logged as two conditions like 3e's.
     # The ORIGINAL spec (weight > 3x mean AND mid-pack likelihood rank) fires
     # once in 476 particle-steps: corr(weight, likelihood rank) = -0.866 and all

@@ -221,6 +221,7 @@ def make_args(**overrides) -> SimpleNamespace:
         protect_leader=1,          # keep the heaviest copy of each root
         enable_expiry=False,       # weight-based retirement, off by default
         rebirth_at_fair_share=False,
+        revival_rebirth=False,        # the same reset, REVIVED particles only
         expiry_weight_frac=0.5,
         expiry_steps=6,
         merge_percentile=95.0,        # Phase 4 merge cut, resolved per run (jaccard)
@@ -377,6 +378,17 @@ def main():
                          "collapse trigger more often (9->13 firings, 3->6 consecutive), and "
                          "cut mint survival 59%%->32%% and argmax churn 8->5. Kept as the "
                          "evidence for that finding.")
+    ap.add_argument("--revival-rebirth", action="store_true", default=False,
+                    help="the fair-share reset for REVIVED particles only. OFF by default: "
+                         "measured on bb_Rodriguez, 80 steps, two seeds a side, it lifts "
+                         "revival birth mass from 0.61-0.77 of fair share to 0.94-0.95 as "
+                         "designed, and exp_4's failure does NOT reproduce at this volume -- "
+                         "root-mass ESS straddles the control (0.759/0.837 against "
+                         "0.775/0.806) rather than falling. But nothing improves: survival "
+                         "(0.53/0.78 vs 0.31/0.73) and churn (35/44 vs 50/42) straddle too. "
+                         "Kept as the evidence that the revival-only cell is harmless and "
+                         "pointless, which is not what exp_4 predicted for it. Needs "
+                         "--revive-retired to do anything.")
     ap.add_argument("--enable-expiry", action="store_true",
                     help="retire a hypothesis held below EXPIRY_WEIGHT_FRAC/n for "
                          "EXPIRY_STEPS consecutive turns, minting a replacement")
@@ -586,6 +598,7 @@ def main():
                      protect_leader=a.protect_leader,
                      enable_expiry=a.enable_expiry,
                      rebirth_at_fair_share=a.rebirth_at_fair_share,
+                     revival_rebirth=a.revival_rebirth,
                      expiry_weight_frac=a.expiry_weight_frac,
                      expiry_steps=a.expiry_steps)
     tracer = build_tracer(args)
@@ -638,6 +651,7 @@ def main():
             "stagnation_steps": a.stagnation_steps,
             "enable_expiry": a.enable_expiry,
             "rebirth_at_fair_share": a.rebirth_at_fair_share,
+            "revival_rebirth": a.revival_rebirth,
             "expiry_weight_frac": a.expiry_weight_frac,
             "expiry_steps": a.expiry_steps,
             "enable_split": a.enable_split,
