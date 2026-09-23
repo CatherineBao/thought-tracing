@@ -1542,5 +1542,37 @@ to be on the Developer API rather than on the models, but there are no GCP
 credentials here to test it. Whether a declared-ranking fallback is good enough
 to carry the filter; that is measurable and has not been measured.
 
+**THE KEY IS NOT THE PROBLEM, and this was checked rather than assumed.** The
+same key, same model, same call, with the flag as the only difference:
+
+```
+plain generation, gemini-2.5-flash          -> returns text        KEY WORKS
++ response_logprobs=True, nothing else changed -> 400 INVALID_ARGUMENT
++ response_logprobs=True alone                 -> 400 INVALID_ARGUMENT
++ logprobs=0                                   -> 400 INVALID_ARGUMENT
+  logprobs=N without response_logprobs         -> 400 "logprobs can only be ..."
+```
+
+Fifteen models tested in total, now including the pro and preview tiers --
+`gemini-3.1-pro-preview`, `gemini-pro-latest`, `gemini-3-flash-preview`,
+`gemini-3.1-flash-lite-preview`, `gemini-3.7-flash` -- all returning
+"Logprobs is not enabled for this model". The credential authenticates and
+generates; the **feature** is not offered on the Gemini Developer API surface it
+reaches. Log-probabilities are a Vertex AI capability.
+
+One detail worth passing on rather than acting on: the wording "Logprobs is not
+enabled **for this model**" reads like a per-model or per-tier entitlement rather
+than a hard absence, and the credential in `.env` is not the classic `AIzaSy...`
+39-character API-key shape. A standard API key on a billing-enabled project, or
+the same models through Vertex, may behave differently. Untested here because
+there are no other credentials.
+
+**A second, smaller finding, free from the same probe.** Asked to "answer with
+one letter" at `max_output_tokens=4` with thinking off, `gemini-2.5-flash`
+replied `"The question asks Alex"` -- it did not comply with the format at all.
+The single-letter constrained answer that the whole letter scheme rests on needs
+its own check **whatever** backend supplies the probabilities, and that check is
+now part of `aligned` rather than an assumption inside it.
+
 This is a resourcing decision, not a methods decision, and it is recorded here
 rather than worked around.
