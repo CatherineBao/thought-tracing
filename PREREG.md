@@ -357,4 +357,99 @@ the forecast numbers are not interpretable.
 
 # OUTCOME (written after scoring; predictions above unedited)
 
-_pending_
+Run: 787 choice points extracted over bloomfield / boeing / oppenheimer, 156
+motives over a cast of 12, **90 held-out choices**, 2,481 forecasts, chance
+0.311. `choice_forecast.json`, `SURPRISES.md`.
+
+## The tripwire fired
+
+```
+blind    0.622      chance 0.311 + 0.10 = 0.411      -> VOID
+```
+
+**VERDICT: VOID by the pre-registered rule.** No lift in this run may be
+quoted as a clean result, and none is below.
+
+**Post-hoc, written after the rule fired and changing nothing about the
+verdict:** the pre-registered rule compares `blind` to CHANCE, which conflates
+two different things — an option set whose phrasing gives the answer away, and
+an option set on which the modal action is usually right. The second is the
+class prior and a blind guesser recovers it for free. Separating them:
+
+```
+blind 0.622   <   majority 0.656
+```
+
+Blind does **not** beat the constant. What it recovered is the class prior, not
+the phrasing. So the diagnosis is **a degenerate label distribution, not outcome
+leakage** — and re-running the same extraction would not fix it. The tripwire as
+written is the wrong test; it should compare `blind` to `majority`. That is a
+correction to this file, not a rescue of this run.
+
+## The result that matters, and it is not the lift
+
+```
+majority (constant "HOLD")   0.656
+blind                        0.622
+habit                        0.589
+role                         0.589
+obvious   <-- the bar        0.533
+--------------------------------------------
+pooled hypothesis            0.653      lift +0.120 over `obvious`
+                                        clustered permutation p = 0.005
+swapped-person control                  lift +0.091   (76% of the real lift)
+```
+
+**The pre-registered bar was badly chosen.** `obvious` — the model with the
+whole transcript and no motive — is *worse than a constant*, by 12 points. A
+lift measured against it is a lift over something no careful reader would
+actually do.
+
+**The full apparatus lands at the constant.** 156 motives, 13 generators, three
+corpora: pooled hypothesis accuracy 0.653 against always-say-`HOLD` at 0.656.
+Everything the motives buy is the class prior that `obvious` was losing.
+
+**No hypothesis survives correction. Zero of 156 clear q <= 0.10.** The largest
+individual lifts (+0.333) all sit on the person with n=3.
+
+## Predictions scored
+
+1. **"The motive is a think-harder prompt." CONFIRMED.** The swapped-person
+   control reached +0.091 against a real +0.120 — 76% of the effect available
+   without knowing whose motive it is. Even with a clean tripwire this would
+   have landed in the pre-registered **WEAK** band, not EFFECT.
+2. **"The alternatives leak." FIRED, BUT MISDIAGNOSED BY MY OWN RULE.** See
+   above: blind beats chance and loses to the constant.
+3. **"Habit eats everything." CONFIRMED, and worse than predicted.** `HOLD` is
+   ~70% of every corpus. A constant beats habit, role, *and* the obvious read,
+   and ties the entire motive apparatus.
+4. **"Surprises are luck." CONFIRMED.** 27 choice points where the obvious read
+   failed and some motive succeeded; the swapped-person motives — which cannot
+   apply to the person whose choice they forecast — caught **25**. The list is
+   its own null. `SURPRISES.md` is written, and reports 0 credible items.
+
+One generator behaved differently and is not a finding: **revealed preference**
+is the only one whose swapped-control lift is *negative* (-0.045 against a real
++0.094) — its motives help their own person and actively hurt on somebody else,
+which is the signature person-specificity would have. It is 1 of 13, q = 0.74,
+and stated here as a lead, not a result.
+
+## Decision taken
+
+Per the pre-registered branch for VOID, plus what the post-hoc diagnosis
+changes:
+
+- **Do not** re-run this extraction. The problem is not outcome leakage, so a
+  blind-safe rewrite of the alternatives fixes nothing.
+- **The tripwire is corrected in the code** to compare `blind` against
+  `majority`, and `majority` is promoted to a permanent baseline.
+- **The bar is corrected**: `obvious` alone is not a sufficient control on a
+  task with a dominant class. Future runs score against `max(obvious,
+  majority)`.
+- **The task needs choice points where the answer is not `HOLD`.** A forecasting
+  benchmark that is 70% one label cannot distinguish a person model from a
+  constant, whatever the method. Either extraction is restricted to contested
+  moments, or the label is made finer than the seven-way taxonomy.
+- Nothing here is tuned against this split. The corpora keep their dev/test
+  assignment.
+

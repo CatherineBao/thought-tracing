@@ -96,12 +96,32 @@ def test_parse_answer_only_accepts_offered_options():
 def test_role_excludes_the_persons_own_choices():
     dev = [_cp(1, "Alice", "dev", "HOLD"), _cp(2, "Alice", "dev", "HOLD"),
            _cp(3, "Alice", "dev", "HOLD"), _cp(4, "Bob", "dev", "CONCEDE")]
-    role, own, _ = F.role_table(dev)
-    chan = F.collections.Counter(role[("c", "ch")])
-    chan.subtract(own[("c", "Alice")])
-    chan = F.collections.Counter({k: v for k, v in chan.items() if v > 0})
-    assert chan == F.collections.Counter({"CONCEDE": 1}), chan
-    assert F.pick_from_counter(chan, ["HOLD", "CONCEDE"], "x") == "CONCEDE"
+    chan, chan_person = F.role_table(dev)
+    rest = F.others_in_channel(chan, chan_person, "c", "ch", "Alice")
+    assert rest == F.collections.Counter({"CONCEDE": 1}), rest
+    assert F.pick_from_counter(rest, ["HOLD", "CONCEDE"], "x") == "CONCEDE"
+
+
+def test_role_subtracts_per_channel_not_per_person():
+    # Alice acts in two channels. Removing her GLOBAL count from one channel
+    # drives that channel negative and can hand `role` an action nobody in it
+    # ever took. Subtraction has to be per channel.
+    dev = [_cp(1, "Alice", "dev", "HOLD"), _cp(2, "Alice", "dev", "HOLD")]
+    dev[1]["channel"] = "other"
+    dev.append(_cp(3, "Bob", "dev", "HOLD"))
+    chan, chan_person = F.role_table(dev)
+    rest = F.others_in_channel(chan, chan_person, "c", "ch", "Alice")
+    assert rest == F.collections.Counter({"HOLD": 1}), rest   # Bob survives
+    assert all(v > 0 for v in rest.values())
+
+
+def test_majority_is_a_constant_from_the_earlier_choices_only():
+    dev = ([_cp(i, "Alice", "dev", "HOLD") for i in range(1, 8)]
+           + [_cp(i, "Bob", "dev", "CONCEDE") for i in range(8, 11)])
+    assert F.majority_action(dev) == "HOLD"
+    # test-side labels must not reach it
+    dev_plus_test = dev + [_cp(i, "Cara", "test", "TRADE") for i in range(11, 40)]
+    assert F.majority_action([c for c in dev_plus_test if c["side"] == "dev"]) == "HOLD"
 
 
 def test_habit_is_restricted_to_the_options_actually_offered():
@@ -132,6 +152,27 @@ def test_permutation_agrees_with_the_exact_test():
     p = F.permutation_p(arm, ref, iters=4000, seed=1)
     assert p < 0.05, p
     assert F.permutation_p([1, 0, 1, 0], [1, 0, 1, 0], iters=2000) > 0.2
+
+
+def test_clustered_permutation_is_conservative_where_pairs_repeat():
+    # Three choice points, each carrying 13 hypotheses that all beat the
+    # reference. Treated as 39 independent wins that is overwhelming; treated
+    # honestly it is three coin flips, which cannot clear 0.05.
+    clusters = {f"cp{i}": [(1, 0)] * 13 for i in range(3)}
+    p_clustered = F.permutation_p_clustered(clusters, iters=8000, seed=3)
+    flat_arm = [1] * 39
+    flat_ref = [0] * 39
+    _, _, p_mcnemar = F.mcnemar(flat_arm, flat_ref)
+    assert p_mcnemar < 1e-10, p_mcnemar
+    assert p_clustered > 0.05, p_clustered
+    # and with enough independent choice points it still detects a real effect
+    many = {f"cp{i}": [(1, 0)] * 13 for i in range(10)}
+    assert F.permutation_p_clustered(many, iters=8000, seed=3) < 0.05
+
+
+def test_clustered_permutation_sees_nothing_in_a_tie():
+    clusters = {f"cp{i}": [(1, 1), (0, 0)] for i in range(12)}
+    assert F.permutation_p_clustered(clusters, iters=4000, seed=1) > 0.2
 
 
 def test_extract_json_prefers_whichever_bracket_comes_first():

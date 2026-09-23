@@ -23,6 +23,12 @@ FOUR BASELINES, EACH ANSWERING A DIFFERENT OBJECTION.
            marked FABRICATED in its own _README.
   obvious  the model with the transcript and the options and no motive. The
            bar every hypothesis is scored against.
+  majority the single most common action in the EARLIER choices, corpus-wide.
+           Added after the extraction showed HOLD is ~70% of every corpus and
+           before any model forecast was read: on a task that skewed, a
+           constant is a harder floor than either frequency baseline, and
+           leaving it out would have flattered everything above it. It uses
+           dev counts only.
   blind    the options and NOTHING else -- no transcript, no person, no
            situation. This one is not a baseline to beat, it is a TRIPWIRE. The
            extractor saw the outcome when it wrote the alternatives, so if the
@@ -143,6 +149,17 @@ def parse_answer(raw, allowed):
 # baselines that need no model
 # --------------------------------------------------------------------------
 
+def majority_action(dev_points):
+    """The commonest action overall, from the earlier choices.
+
+    A constant. On a corpus where one action is 70% of the record this is the
+    real floor, and it costs nothing -- which is exactly why it has to be in
+    the table rather than left for a reader to work out.
+    """
+    c = collections.Counter(cp["actual"] for cp in dev_points)
+    return c.most_common(1)[0][0] if c else None
+
+
 def habit_table(dev_points):
     per = collections.defaultdict(collections.Counter)
     for cp in dev_points:
@@ -156,15 +173,25 @@ def role_table(dev_points):
     'Else' matters: including the person collapses this into habit, and the two
     baselines would then rise and fall together and neither would be a control
     on the other.
+
+    Subtracted PER CHANNEL, not per person. habit_table counts a person across
+    every channel they appear in, so taking it off one channel's counter
+    removes choices they made somewhere else -- which can drive a count
+    negative and hand `role` an action nobody in that channel ever took.
     """
-    per = collections.defaultdict(collections.Counter)
+    chan = collections.defaultdict(collections.Counter)
+    chan_person = collections.defaultdict(collections.Counter)
     for cp in dev_points:
-        per[(cp["corpus"], cp["channel"])][cp["actual"]] += 1
-    own = habit_table(dev_points)
-    chan_of = {}
-    for cp in dev_points:
-        chan_of.setdefault((cp["corpus"], cp["person"]), set()).add(cp["channel"])
-    return per, own, chan_of
+        chan[(cp["corpus"], cp["channel"])][cp["actual"]] += 1
+        chan_person[(cp["corpus"], cp["channel"], cp["person"])][cp["actual"]] += 1
+    return chan, chan_person
+
+
+def others_in_channel(chan, chan_person, corpus, channel, person):
+    """That channel's action mix with this person's own choices removed."""
+    rest = collections.Counter(chan[(corpus, channel)])
+    rest.subtract(chan_person[(corpus, channel, person)])
+    return collections.Counter({k: v for k, v in rest.items() if v > 0})
 
 
 def pick_from_counter(counter, allowed, tiebreak):
@@ -209,6 +236,34 @@ def benjamini_hochberg(pvals):
         prev = min(prev, pvals[i] * n / k)
         q[i] = prev
     return q
+
+
+def permutation_p_clustered(clusters, iters=20000, seed=0):
+    """Permutation p where the exchangeable unit is a CHOICE POINT, not a forecast.
+
+    The pooled comparison reuses one `obvious` forecast as the reference for
+    all thirteen of a person's hypotheses, so the thirteen discordant pairs on
+    one choice point are not thirteen independent pieces of evidence -- they
+    share their reference and most of their prompt. Flipping them independently
+    (which a plain McNemar does implicitly) makes the pooled p anti-conservative
+    by roughly the cluster size.
+
+    Here a coin is flipped per choice point and applied to every pair inside it,
+    which is the dependency the design actually has. This is the headline p;
+    the unclustered McNemar is reported beside it and labelled.
+    """
+    rng = random.Random(seed)
+    obs = sum(x - y for pairs in clusters.values() for x, y in pairs)
+    keys = list(clusters)
+    hits = 0
+    for _ in range(iters):
+        tot = 0
+        for k in keys:
+            flip = 1 if rng.random() < 0.5 else -1
+            tot += flip * sum(x - y for x, y in clusters[k])
+        if tot >= obs:
+            hits += 1
+    return (hits + 1) / (iters + 1)
 
 
 def permutation_p(arm, ref, iters=20000, seed=0):
@@ -280,7 +335,39 @@ def build_jobs(test_points, ctx, motives, context_turns, swap_seed=0):
     return jobs, swap_of
 
 
-def run(corpora, model, context_turns=40, out=OUT, iters=20000):
+def cap_test(test, max_per_person):
+    """The EARLIEST n held-out choices per person, or all of them.
+
+    Chronological, never sampled: picking which held-out choices to score after
+    the extraction exists is a selection on the data, and taking the earliest
+    is the one rule that cannot be tuned. The cap exists because the forecast
+    leg is quadratic in the cast -- every motive is also run against another
+    person's choices -- and an uncapped run is ~7,000 calls for no more
+    statistical power than a capped one.
+    """
+    if not max_per_person:
+        return test
+    per = collections.defaultdict(list)
+    for cp in sorted(test, key=lambda c: (c.get("date") or "", c["at_turn"])):
+        per[(cp["corpus"], cp["person"])].append(cp)
+    return [cp for v in per.values() for cp in v[:max_per_person]]
+
+
+def cap_cast(motives, test, max_cast):
+    """Keep the people with the most held-out choices, ties broken by name.
+
+    Chosen on COUNT, which is known before any forecast is made, so this is not
+    a selection on how well anybody scores.
+    """
+    if not max_cast:
+        return motives
+    counts = collections.Counter((cp["corpus"], cp["person"]) for cp in test)
+    keep = {k for k, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:max_cast]}
+    return [h for h in motives if (h["corpus"], h["person"]) in keep]
+
+
+def run(corpora, model, context_turns=40, out=OUT, iters=20000,
+        max_test_per_person=None, max_cast=None, chunk=32):
     points = [cp for c in corpora for cp in load_points(c)]
     motives = [h for h in load_motives() if h["corpus"] in corpora]
     if not motives:
@@ -293,10 +380,17 @@ def run(corpora, model, context_turns=40, out=OUT, iters=20000):
     if not test:
         raise SystemExit("no held-out choices for anybody in the cast")
 
+    test = cap_test(test, max_test_per_person)
+    motives = cap_cast(motives, test, max_cast)
+    cast = {(h["corpus"], h["person"]) for h in motives}
+    test = [cp for cp in test if (cp["corpus"], cp["person"]) in cast]
+
     ctx = Context(corpora)
     jobs, swap_of = build_jobs(test, ctx, motives, context_turns)
+    print(f"  {len(jobs)} forecasts over {len(test)} held-out choices, "
+          f"cast of {len(cast)}, {len(motives)} motives")
     raws = model.batch_interact([j[3] for j in jobs], system_prompts=[j[4] for j in jobs],
-                                temperature=0, max_tokens=120)
+                                temperature=0, max_tokens=120, chunk=chunk)
 
     # arm -> cp_id -> predicted label
     pred = collections.defaultdict(dict)
@@ -310,15 +404,19 @@ def run(corpora, model, context_turns=40, out=OUT, iters=20000):
 
     # the two model-free baselines
     habit = habit_table(dev)
-    role, _, chan_of = role_table(dev)
+    chan, chan_person = role_table(dev)
+    mode = majority_action(dev)
     for cp in test:
         allowed = [a["action"] for a in cp["alternatives"]]
         key = (cp["corpus"], cp["person"])
         pred["habit"][cp["cp_id"]] = pick_from_counter(habit[key], allowed, cp["cp_id"])
-        others = collections.Counter(role[(cp["corpus"], cp["channel"])])
-        others.subtract(habit[key])                       # everybody ELSE
-        others = collections.Counter({k: v for k, v in others.items() if v > 0})
+        others = others_in_channel(chan, chan_person, cp["corpus"], cp["channel"],
+                                   cp["person"])
         pred["role"][cp["cp_id"]] = pick_from_counter(others, allowed, cp["cp_id"])
+        # A constant, offered only where it is on the menu. Where it is not,
+        # it abstains rather than guessing -- an abstention scores as a miss,
+        # which is the honest cost of being a constant.
+        pred["majority"][cp["cp_id"]] = mode if mode in allowed else None
 
     truth = {cp["cp_id"]: cp["actual"] for cp in test}
     order = [cp["cp_id"] for cp in sorted(test, key=lambda c: c["cp_id"])]
@@ -331,7 +429,7 @@ def run(corpora, model, context_turns=40, out=OUT, iters=20000):
     ref = vec("obvious")
 
     summary = {}
-    for arm in ("habit", "role", "obvious", "blind"):
+    for arm in ("majority", "habit", "role", "obvious", "blind"):
         v = vec(arm)
         b, c, p = mcnemar(v, ref)
         summary[arm] = {"n": len(v), "accuracy": round(st.mean(v), 4),
@@ -371,17 +469,25 @@ def run(corpora, model, context_turns=40, out=OUT, iters=20000):
 
     # pooled: every hypothesis forecast against the same obvious forecast
     pooled_real, pooled_base, pooled_swap, pooled_swap_base = [], [], [], []
+    clusters = collections.defaultdict(list)
+    swap_clusters = collections.defaultdict(list)
     for h in motives:
         ids = sorted(cp["cp_id"] for cp in test
                      if (cp["corpus"], cp["person"]) == (h["corpus"], h["person"]))
-        pooled_real += vec(f"hyp:{h['hyp_id']}", ids)
-        pooled_base += vec("obvious", ids)
+        r, b_ = vec(f"hyp:{h['hyp_id']}", ids), vec("obvious", ids)
+        pooled_real += r
+        pooled_base += b_
+        for i, x, y in zip(ids, r, b_):
+            clusters[i].append((x, y))
         sk = swap_of.get((h["corpus"], h["person"]))
         if sk:
             sids = sorted(cp["cp_id"] for cp in test
                           if (cp["corpus"], cp["person"]) == sk)
-            pooled_swap += vec(f"swap:{h['hyp_id']}", sids)
-            pooled_swap_base += vec("obvious", sids)
+            sr, sb = vec(f"swap:{h['hyp_id']}", sids), vec("obvious", sids)
+            pooled_swap += sr
+            pooled_swap_base += sb
+            for i, x, y in zip(sids, sr, sb):
+                swap_clusters[i].append((x, y))
 
     b, c, p = mcnemar(pooled_real, pooled_base)
     sb, sc, sp = mcnemar(pooled_swap, pooled_swap_base) if pooled_swap else (0, 0, 1.0)
@@ -390,12 +496,19 @@ def run(corpora, model, context_turns=40, out=OUT, iters=20000):
         "hypothesis_accuracy": round(st.mean(pooled_real), 4) if pooled_real else None,
         "obvious_accuracy": round(st.mean(pooled_base), 4) if pooled_base else None,
         "lift": round(st.mean(pooled_real) - st.mean(pooled_base), 4) if pooled_real else None,
-        "mcnemar": {"better": b, "worse": c, "p": round(p, 6)},
-        "permutation_p": round(permutation_p(pooled_real, pooled_base, iters), 5),
+        "mcnemar": {"better": b, "worse": c, "p": round(p, 6),
+                     "caveat": ("ANTI-CONSERVATIVE. One `obvious` forecast is the "
+                                "reference for all of a person's hypotheses, so these "
+                                "pairs are not independent. Use permutation_p.")},
+        "permutation_p": round(permutation_p_clustered(clusters, iters), 5),
+        "permutation_unit": "choice point (all hypotheses on one point flip together)",
+        "n_clusters": len(clusters),
         "swap_control": {
             "forecasts": len(pooled_swap),
             "lift": round(st.mean(pooled_swap) - st.mean(pooled_swap_base), 4) if pooled_swap else None,
             "mcnemar": {"better": sb, "worse": sc, "p": round(sp, 6)},
+            "permutation_p": (round(permutation_p_clustered(swap_clusters, iters), 5)
+                              if swap_clusters else None),
         },
     }
 
@@ -423,6 +536,10 @@ def run(corpora, model, context_turns=40, out=OUT, iters=20000):
         "model": model.model_name, "context_turns": context_turns,
         "cast": sorted(f"{c}:{p}" for c, p in cast),
         "n_test_choices": len(test), "n_dev_choices": len(dev),
+        "majority_action": mode,
+        "caps": {"max_test_per_person": max_test_per_person, "max_cast": max_cast,
+                 "rule": "earliest choices per person; cast by held-out count, both "
+                         "fixed before any forecast is made"},
         "chance_rate": round(chance, 4),
         "swap_pairing": {f"{a[0]}:{a[1]}": f"{b[0]}:{b[1]}" for a, b in swap_of.items()},
         "tripwire": verdict["tripwire"],
@@ -438,24 +555,50 @@ def run(corpora, model, context_turns=40, out=OUT, iters=20000):
 
 def read_verdict(summary, pooled, chance):
     blind = summary["blind"]["accuracy"]
+    majority = summary.get("majority", {}).get("accuracy")
     leak = blind > chance + 0.10
+    # POST-HOC, and labelled as such. The pre-registered rule compares blind to
+    # CHANCE, which conflates two things: an option set whose phrasing gives the
+    # answer away (a real leak), and an option set on which the modal action is
+    # usually right (the class prior, which is not a leak and which a blind
+    # guesser recovers for free). Comparing blind to the majority constant
+    # separates them. This refinement was written after the rule fired and does
+    # not change the verdict it produced.
+    beats_prior = (majority is not None and blind > majority)
     tripwire = {
         "blind_accuracy": blind, "chance_rate": round(chance, 4),
+        "majority_accuracy": majority,
         "leaks": leak,
-        "reading": ("THE ALTERNATIVE SETS LEAK. The options alone predict the answer "
-                    "well above chance, so the extractor wrote them knowing the "
-                    "outcome and every lift below is uninterpretable."
+        "rule": "PRE-REGISTERED: blind > chance + 0.10",
+        "reading": ("THE ALTERNATIVE SETS LEAK by the pre-registered rule. The options "
+                    "alone predict the answer well above chance."
                     if leak else
                     "clean -- the options alone do not predict the answer"),
+        "post_hoc": {
+            "blind_beats_majority": beats_prior,
+            "reading": (("blind also beats the majority constant, so the option "
+                         "phrasing carries information beyond the class prior -- this "
+                         "is a real leak")
+                        if beats_prior else
+                        ("blind does NOT beat the majority constant, so what it "
+                         "recovers is the class prior (one action dominates the menu "
+                         "and the record), not the phrasing. That is a degenerate "
+                         "label distribution, not outcome leakage -- a different "
+                         "problem, and not one a rerun of the same extraction fixes.")),
+            "status": "written after the rule fired; does not change the verdict",
+        },
     }
     if leak:
-        return {"tripwire": tripwire, "verdict": "VOID -- alternative sets leak"}
+        return {"tripwire": tripwire,
+                "verdict": ("VOID by the pre-registered tripwire -- blind "
+                            f"{blind:.3f} > chance {chance:.3f} + 0.10")}
     lift = pooled["lift"]
     swap = (pooled["swap_control"] or {}).get("lift")
     if lift is None:
         return {"tripwire": tripwire, "verdict": "no forecasts"}
-    if pooled["mcnemar"]["p"] > 0.05:
-        v = f"NO EFFECT -- pooled lift {lift:+.3f}, p={pooled['mcnemar']['p']}"
+    p_head = pooled["permutation_p"]
+    if p_head > 0.05:
+        v = f"NO EFFECT -- pooled lift {lift:+.3f}, permutation p={p_head}"
     elif swap is not None and swap >= lift:
         v = (f"CONTROL MOVED WITH IT -- real lift {lift:+.3f}, swapped-person lift "
              f"{swap:+.3f}. A motive that forecasts somebody else's choices as well "
@@ -465,12 +608,12 @@ def read_verdict(summary, pooled, chance):
         # clean result and must not be reported as one, but it is also not the
         # flat null above -- naming it stops the reader picking whichever of
         # the two neighbouring verdicts they prefer.
-        v = (f"WEAK -- pooled lift {lift:+.3f} (p={pooled['mcnemar']['p']}) but the "
+        v = (f"WEAK -- pooled lift {lift:+.3f} (permutation p={p_head}) but the "
              f"swapped-person control reached {swap:+.3f}, at least half of it. Most "
              f"of what the motive buys is available without knowing whose motive it is.")
     else:
         v = (f"EFFECT -- pooled lift {lift:+.3f} over the obvious read "
-             f"(p={pooled['mcnemar']['p']}), swapped-person control {swap:+.3f}")
+             f"(permutation p={p_head}), swapped-person control {swap:+.3f}")
     return {"tripwire": tripwire, "verdict": v}
 
 
@@ -486,14 +629,19 @@ def collect_surprises(test, truth, pred, motives, rows, swap_of):
     """
     by_id = {cp["cp_id"]: cp for cp in test}
     credible = {r["hyp_id"] for r in rows if r.get("q", 1.0) <= 0.10 and r["lift"] > 0}
-    out, swap_hits = [], 0
+    out, swap_points = [], 0
     for cp_id, actual in truth.items():
         if pred["obvious"].get(cp_id) == actual:
             continue
         hits = [h for h in motives
                 if pred.get(f"hyp:{h['hyp_id']}", {}).get(cp_id) == actual]
-        swap_hits += sum(1 for h in motives
-                         if pred.get(f"swap:{h['hyp_id']}", {}).get(cp_id) == actual)
+        # COUNT CHOICE POINTS, NOT HITS. The first version of this counted every
+        # (motive, point) hit on the swap side against a count of POINTS on the
+        # real side, so the null came out an order of magnitude too large and
+        # would have buried a genuine list. Both sides are now "points where at
+        # least one motive was right".
+        swap_points += any(pred.get(f"swap:{h['hyp_id']}", {}).get(cp_id) == actual
+                           for h in motives)
         if not hits:
             continue
         cp = by_id[cp_id]
@@ -513,10 +661,11 @@ def collect_surprises(test, truth, pred, motives, rows, swap_of):
         "obvious_misses": sum(1 for i, a in truth.items() if pred["obvious"].get(i) != a),
         "caught_by_some_hypothesis": len(out),
         "caught_by_a_credible_hypothesis": sum(1 for s in out if s["any_credible"]),
-        "swapped_motive_hits_on_the_same_misses": swap_hits,
+        "same_misses_caught_by_a_swapped_motive": swap_points,
         "null_note": ("swapped motives cannot apply to the person whose choice they "
-                      "forecast. A surprise list no longer than what they produce is "
-                      "luck, not insight."),
+                      "forecast, so the points they still 'catch' are the luck rate. "
+                      "Both numbers count CHOICE POINTS where at least one motive was "
+                      "right. A list no longer than its own null is not a finding."),
         "items": out,
     }
 
@@ -531,8 +680,8 @@ def write_surprises(res, path=SURPRISES):
          f"- some hypothesis right on **{s['caught_by_some_hypothesis']}** of them",
          f"- a hypothesis that beat the obvious read overall (q <= 0.10) right on "
          f"**{s['caught_by_a_credible_hypothesis']}**",
-         f"- the swapped-person control scored **{s['swapped_motive_hits_on_the_same_misses']}** "
-         f"hits on those same misses\n",
+         f"- the swapped-person control caught **{s['same_misses_caught_by_a_swapped_motive']}** "
+         f"of the same points\n",
          f"> {s['null_note']}\n",
          f"**Verdict on the run as a whole:** {res['verdict']}\n", "---\n"]
     for i, item in enumerate(s["items"], 1):
@@ -571,20 +720,27 @@ def main():
     ap.add_argument("--iters", type=int, default=20000)
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--surprises", default=SURPRISES)
+    ap.add_argument("--max-test-per-person", type=int, default=10)
+    ap.add_argument("--max-cast", type=int, default=12)
+    ap.add_argument("--chunk", type=int, default=32)
     ap.add_argument("--fake", action="store_true")
     a = ap.parse_args()
 
     corpora = [c.strip() for c in a.corpora.split(",") if c.strip()]
     model = FakeModel() if a.fake else CachedModel(a.model)
-    res = run(corpora, model, a.context_turns, a.out, a.iters)
+    res = run(corpora, model, a.context_turns, a.out, a.iters,
+              a.max_test_per_person, a.max_cast, a.chunk)
     with open(a.out, "w", encoding="utf-8") as fh:
         json.dump(res, fh, ensure_ascii=False, indent=1)
     write_surprises(res, a.surprises)
 
     print(f"\n{res['n_test_choices']} held-out choices, cast of {len(res['cast'])}, "
           f"chance {res['chance_rate']:.3f}")
-    print(f"\nTRIPWIRE  blind={res['tripwire']['blind_accuracy']:.3f}  "
-          f"-> {res['tripwire']['reading']}")
+    tw = res["tripwire"]
+    print(f"\nTRIPWIRE  blind={tw['blind_accuracy']:.3f}  chance={tw['chance_rate']:.3f}  "
+          f"majority={tw['majority_accuracy']}")
+    print(f"  {tw['reading']}")
+    print(f"  POST-HOC: {tw['post_hoc']['reading']}")
     print("\nbaselines:")
     for arm, d in res["baselines"].items():
         print(f"  {arm:<10} acc {d['accuracy']:.3f}  ({d['correct']}/{d['n']}) "
@@ -592,7 +748,8 @@ def main():
     p = res["pooled"]
     print(f"\npooled  hypothesis {p['hypothesis_accuracy']:.3f} vs obvious "
           f"{p['obvious_accuracy']:.3f}  lift {p['lift']:+.3f}  "
-          f"McNemar p={p['mcnemar']['p']}  perm p={p['permutation_p']}")
+          f"clustered perm p={p['permutation_p']} over {p['n_clusters']} choice points "
+          f"(McNemar p={p['mcnemar']['p']}, anti-conservative)")
     sc = p["swap_control"]
     print(f"swap    lift {sc['lift']}  (p={sc['mcnemar']['p']})")
     print("\nby method (mean lift / swapped-control lift):")
@@ -600,8 +757,8 @@ def main():
         print(f"  {m:<14} {d['mean_lift']:+.3f}   {d['mean_swap_lift']}")
     print(f"\nVERDICT: {res['verdict']}")
     print(f"surprises -> {a.surprises}  ({res['surprises']['caught_by_a_credible_hypothesis']} "
-          f"credible of {res['surprises']['caught_by_some_hypothesis']}, "
-          f"swap null {res['surprises']['swapped_motive_hits_on_the_same_misses']})")
+          f"credible of {res['surprises']['caught_by_some_hypothesis']} points, "
+          f"swap null {res['surprises']['same_misses_caught_by_a_swapped_motive']} points)")
     print(f"\n{model.stats()}")
     if a.fake:
         print("FAKE MODEL -- nothing here is evidence")
