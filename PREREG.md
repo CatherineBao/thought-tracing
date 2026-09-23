@@ -1488,3 +1488,59 @@ offers a few infeasible alternatives (a C2 cost) and **inflates k** -- and
 because the gate limit falls as k rises, an over-permissive map makes the
 threshold **harder** to pass, never easier. Recorded so the direction is not
 re-derived later.
+
+---
+
+# OUTCOME — Phase B, the forecaster backend. **THE PRIMARY PATH IS DEAD ON THIS KEY.**
+
+Run before the M1 budget, which is the reason this phase exists. Cost: eleven
+calls, all of which failed.
+
+**Every Gemini model reachable on this key refuses log-probabilities.**
+
+```
+gemini-2.5-flash        400  "Logprobs is not enabled for models/gemini-2.5-flash"
+gemini-2.5-flash-lite   400  "Logprobs is not enabled for models/gemini-2.5-flash-lite"
+gemini-3.5-flash        400  "Logprobs is not enabled for this model"
+gemini-3.5-flash-lite   400  "Logprobs is not enabled for this model"
+gemini-3.6-flash        400  "Logprobs is not enabled for this model"
+gemini-3.8-flash        400  "Logprobs is not enabled for this model"
+gemini-3.1-flash-lite   400  "Logprobs is not enabled for this model"
+gemini-flash-latest     400  "Logprobs is not enabled for this model"
+gemini-2.0-flash        404  no longer available
+gemini-2.5-pro          404  no longer available to new users
+```
+
+The SDK is not the problem: `google-genai` exposes `response_logprobs` and
+`logprobs` on `GenerateContentConfig`, and the request is well formed. The
+**service** declines. 32 `generateContent` models are visible on this key and
+none of the plausible text models accepts the parameter.
+
+This falsifies the plan's central technical bet -- "the forecast answers with a
+single option letter, and one call returning top-k log-probs at that position
+gives an exact normalised distribution". The call does not exist here.
+
+**The pre-registered branch applies, and it was written for exactly this:**
+
+> If `response_logprobs` does not work, the honest options are a coarse declared
+> ranking over alternatives, or pause -- not K = 20 frequencies.
+
+And the arithmetic that rules out sampling is unchanged: at `eps_frac = 0.12` and
+n = 6 the epsilon floor is ~0.02, so a sampling resolution of 1/K needs **K > 50**
+per particle per choice point, which is not affordable at ~600 points x 6
+particles x 2 orders.
+
+**Nothing downstream may be tuned**: `forecast_backend.json` is not written, and
+the standing rule that no forecast threshold is set until it shows
+`confirmed: true` now blocks M1.
+
+**What is NOT established by this.** Whether a different provider would work
+(OpenAI's chat completions expose `logprobs` with `top_logprobs` up to 20, which
+is precisely the shape required; no key for it here, and the `openai` package is
+not installed). Whether Vertex AI's Gemini would work -- the restriction appears
+to be on the Developer API rather than on the models, but there are no GCP
+credentials here to test it. Whether a declared-ranking fallback is good enough
+to carry the filter; that is measurable and has not been measured.
+
+This is a resourcing decision, not a methods decision, and it is recorded here
+rather than worked around.
