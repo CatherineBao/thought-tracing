@@ -967,3 +967,198 @@ than an expectation.** Its job is to validate the choice likelihood and the
 recovery of a known priority order one-shot. Every sequential claim -- the
 filter, the operators, marginal churn, transfer -- rests on atla, Diplomacy and
 the bloomfield contingency, and no M2 number may be quoted from CaSiNo.
+
+---
+
+# OUTCOME — CaSiNo's five open decisions, settled by measurement before the converter
+
+Every figure below is a count over `data/casino/casino.json`. No model was called.
+
+### 1. The allocation is already in the chat, so the prefix is cut earlier
+
+```
+an explicit PROSE allocation precedes the Submit-Deal in 1,158 / 1,181 = 0.981
+prefix to the submission          mean 12.4 turns   median 11
+prefix to the first allocation    mean  3.8 turns   median  3
+```
+
+**98.1%.** Forecasting the allocation from the conversation up to the submission
+is reading comprehension: the two people have just spelled the deal out in prose
+and the `Submit-Deal` formalises it. `context_neutral` would sit near ceiling,
+the headroom gate would fail, and the lift would be a measurement of the model's
+reading.
+
+**Registered before the converter runs: the prefix is cut at the first explicit
+allocation proposal by either party**, and the task is to forecast the eventual
+allocation from what came before it. That is selection on the **input**, it
+creates genuine headroom, and it matches the actual question -- inferring what
+somebody wants before they have negotiated it out loud. It is a change to the
+task definition and is recorded as one. The detector is a frozen regex (a
+quantity adjacent to an issue word, or a `Submit-Deal`), reported with its hit
+rate, not tuned afterwards.
+
+### 2. The silent subgroup, counted
+
+```
+person stated no issue priority anywhere in their own prefix
+
+  under the full cut    215 / 1,181 = 0.182
+  under the early cut   743 / 1,181 = 0.629
+```
+
+Under the full cut the subgroup is 215 points, which makes it a footnote. Under
+the early cut it is 743. **So #1 is necessary, not optional**: the early cut is
+what turns CaSiNo's only genuine test from a footnote into a dataset. (Detector:
+an issue word within a need/priority phrase, frozen and reported.)
+
+### 3. Ties get their own outcomes
+
+```
+proposals claiming one issue outright   785  0.665
+ties (2/2/1, equal splits, etc.)        396  0.335
+```
+
+**A third of all allocations are ties.** They are their own labels
+(`Firewood+Water`, `Food+Water`, `Firewood+Food`, all-three), never excluded and
+never broken. Excluding them would be selection on the outcome and would delete a
+third of the corpus; breaking them would invent a preference the proposal does
+not express. A deal claiming two issues equally is a different claim from one
+that picks a favourite, and the label says so.
+
+### 4. The M2 partition is folded into M1 test
+
+CaSiNo has no M2 (see below), so an untouched M2 partition would buy a
+replication of a calibration result. Power on the **silent subgroup** is worth
+more: at 743 points corpus-wide, splitting dev/test and then test again into
+M1/M2 would leave roughly 186 silent points to carry CaSiNo's only real test.
+**Registered before either partition is read**, per rule 6.
+
+### 5. CaSiNo cannot test new situations either
+
+```
+where the Submit-Deal falls in the dialogue (0 = start, 1 = end)
+  p25 0.909   p50 0.909   p75 0.923   p90 0.933   mean 0.887
+  share in the last 25% of the dialogue: 0.919
+```
+
+Every allocation choice happens at the end. **"Negotiation phase" does not vary**,
+so it cannot be a held-out situation type, and no other input-side type varies
+either at one point per person. **CaSiNo can test neither transfer axis** -- not
+cross-span (no persistent participant id) and not new-situation (no phase
+variation). Recorded now so neither absence is later read as a null result.
+
+**CaSiNo's role, final:** Milestone 1 calibration, on the early cut, with the
+silent subgroup as its one genuine test. No sequential claim, no transfer claim.
+
+---
+
+# OUTCOME — Diplomacy, gated before any CaSiNo converter work
+
+Run first, deliberately: if Diplomacy failed the way CaSiNo's deal responses did,
+the bloomfield contingency would become the main path and the CaSiNo work would
+have been done against the wrong plan.
+
+**The season field exists.** Messages carry `seasons` ('Spring' / 'Fall' /
+'Winter') alongside `years` and `game_id`, and the moves files are keyed
+`DiplomacyGame{N}_{year}_{season}`. Alignment is therefore
+`(game_id, year, season)` and the Fall-messages-before-Spring-orders leak the
+plan warned about **cannot occur**. 342 phase files parse, 114 per season, game
+ids 1-12 match on both sides, and **all 312 messaged phases have orders**.
+
+Order types: MOVE 4,041, SUPPORT 2,029, HOLD 1,091, BUILD 441, DISBAND 155,
+CONVOY 138. `SUPPORT` carries `from`, so the supported power resolves; occupancy
+comes free from the order keys, since `orders[Power]` is keyed by that power's
+own unit provinces.
+
+### The (player, power) pair unit FAILS
+
+```
+movement phases, ordered pairs that exchanged messages
+
+  messaged only              n=3,020   neither 0.816   attack 0.104  support 0.074
+  messaged AND in contact    n=2,311   neither 0.759   attack 0.136  support 0.097
+
+  majority_share   0.8159 / 0.7594   both FAIL (limit 0.45)
+```
+
+Restricting to messaged powers was supposed to keep `neither` down and does not:
+talking to a power is not the same as being able to reach it. Adding the
+secondary *in contact* restriction helps by six points and still fails. This is
+structural, not fixable by a better restriction -- a power has a handful of units
+and six neighbours, and acts on at most two or three of them in a phase, so the
+pair framing manufactures a `neither` sink the way `HOLD` and `Accept` did.
+
+### The primary-target unit PASSES, and is adopted
+
+One choice per (player, movement phase): **which power does this player act
+against or for this phase**, by the frozen rule *the power receiving the most of
+this player's orders, ties broken alphabetically*, with `NONE` when the player
+acts on nobody.
+
+```
+n = 1,058 over 83 (game, power) units, k = 8
+
+  NONE 368 0.348 | Austria 151 0.143 | France 121 0.114 | Russia 94 0.089
+  Italy 88 0.083 | England 86 0.081 | Germany 85 0.080 | Turkey 65 0.061
+
+  [PASS] majority_share      0.3478   limit 0.45
+  [PASS] entropy_frac        0.9728   limit 0.75
+  [PASS] loo_person_constant 0.3478   limit 0.60
+```
+
+Seven powers plus `NONE` is **eight labels**, which is exactly the `A`-`H` letter
+scheme already registered in Phase B.
+
+**All three candidate rules were measured and all three are reported**, so the
+adopted one is not a survivor of an unreported search:
+
+```
+primary attack target only      majority 0.4395  entropy 0.9077   PASS (marginal)
+primary support target only     majority 0.7628  entropy 0.5166   FAIL
+primary target, attack or support majority 0.3478 entropy 0.9728  PASS  <- adopted
+```
+
+**The selection was made on the LABEL DISTRIBUTION, with no forecast in
+existence.** No lift, no arm and no model output influenced it. That is the same
+basis on which CaSiNo's deal responses were dropped, and it is recorded here so
+the choice cannot later be mistaken for a result.
+
+### Two things this leaves open, both flagged now
+
+- **A real adjacency map is still needed, for the ALTERNATIVES rather than the
+  label.** The label needs no map, but C2 (genuinely feasible) does: offering
+  "attack Turkey" to a player whose units are nowhere near Turkey is not a
+  feasible option. The adjacency used above was reconstructed from observed
+  transitions and is too permissive to serve -- mean degree 12.6 against a real
+  board's four to five -- so the converter takes a proper standard-map
+  adjacency, and that is a build item, not a measurement.
+- **The relationship-state situation type must be defined from PRIOR phases
+  only.** A relationship "turning" is normally identified by an attack, which is
+  itself a choice outcome; if the type at phase *t* reads anything from phase *t*
+  or later, the transfer split leaks the outcome it is meant to hold out.
+  Registered definition: **a PRIOR phase contained an attack between these two
+  powers**. Added to `test_hindsight.py`'s obligations.
+
+---
+
+## Refinements to the clause-4 measurement, registered
+
+- **The normalisation bound is `min(H(w), log2 k)`, not `H(w)`.** Dividing by the
+  weight entropy alone understates a saturated point: four accounts maximally
+  opposed over two options have `H(w) = 2` bits but can only ever reach 1, so
+  `H(w)` alone would report 0.5 for a population as split as the option set
+  permits. Fixed in `prequential.forecast_disagreement`.
+- **Stratify WITHIN choice type.** A type offering more options can score higher
+  for free, so a single corpus-wide median cut would partly sort points by type
+  rather than by disagreement. `stratify_by_disagreement(..., within='kind')`.
+- **Record position in the run, and check the high stratum against it.** Weights
+  start uniform and concentrate, so disagreement falls over a run by
+  construction and early points land in the high stratum on position alone. Any
+  concentration of lift in the high stratum is reported beside the position
+  distribution, and lift that is really "lift early in the run" is named as that.
+- **Flat lift across strata has two readings, and the placebo separates them.**
+  Registered in advance: lift in the LOW-disagreement stratum that sits **above**
+  the within-stratum placebo is a shared insight the bar lacks -- something every
+  account knows and the reference does not. Lift in that stratum **at** placebo
+  level is the think-harder effect, i.e. the Phase CP failure recurring. The
+  placebo is computed within each stratum for exactly this reason.

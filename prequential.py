@@ -247,10 +247,24 @@ def forecast_disagreement(distributions, weights=None, normalise=False):
     majority action was not taken". Points are STRATIFIED by it and both strata
     are reported.
 
-    normalise=True divides by H(w), giving the fraction of the disagreement the
-    population could possibly express. Use it when comparing corpora whose
-    populations differ in size or concentration; the raw figure is not
-    comparable across those.
+    normalise=True divides by the TIGHT bound, min(H(w), log2 k), giving the
+    fraction of the disagreement this point could possibly carry.
+
+    BOTH TERMS MATTER AND DIVIDING BY H(w) ALONE IS WRONG. D is bounded by the
+    weight entropy -- a population with one dominant account cannot disagree
+    much whatever it believes -- and ALSO by log2 k, because D <= H(mixture) and
+    a mixture over k options cannot exceed log2 k bits. Two confounds follow,
+    and the raw figure is comparable across neither:
+
+      choice type  a type offering more options can score higher for free, so a
+                   single corpus-wide median cut would partly sort points BY
+                   TYPE rather than by disagreement. Stratify within type, or
+                   normalise.
+      position     weights start uniform and concentrate as a run proceeds, so
+                   D falls over a run by construction. Early points would land
+                   in the high stratum on position alone, which is why
+                   `position` is recorded on every point and any concentration
+                   of lift in the high stratum is checked against it.
     """
     dists = [d for d in distributions if d]
     if len(dists) < 2:
@@ -268,8 +282,8 @@ def forecast_disagreement(distributions, weights=None, normalise=False):
     d = _h(mixture) - sum(w * _h(d) for w, d in zip(weights, dists))
     d = max(0.0, d)                      # float error only; the quantity is >= 0
     if normalise:
-        hw = _h(weights)
-        return (d / hw) if hw > 0 else 0.0
+        bound = min(_h(weights), math.log(len(keys), 2) if len(keys) > 1 else 0.0)
+        return (d / bound) if bound > 0 else 0.0
     return d
 
 
@@ -313,11 +327,32 @@ def disagreement_cut(dev_values, quantile=0.5):
     return vals[k]
 
 
-def stratify_by_disagreement(points, cut, key='disagreement'):
-    """Split points into the two pre-registered strata. Both are reported."""
-    lo = [p for p in points if float(p.get(key) or 0.0) <= cut]
-    hi = [p for p in points if float(p.get(key) or 0.0) > cut]
-    return {'cut': cut, 'low': lo, 'high': hi,
+def stratify_by_disagreement(points, cut, key='disagreement', within=None):
+    """Split points into the two pre-registered strata. Both are reported.
+
+    `within` names a field to stratify WITHIN -- normally the choice type. A
+    single corpus-wide cut on a raw (unnormalised) statistic would partly sort
+    by type, because a type offering more options can score higher for free.
+    Passing within='kind' resolves a separate cut per type; `cut` may then be a
+    mapping from type to cut, or a single value applied to each.
+
+    Nothing is ever dropped: every point lands in exactly one stratum, and a
+    point with no recorded disagreement falls in LOW, because treating an
+    unmeasured point as high would quietly promote it into the stratum the
+    claim rests on.
+    """
+    if within is None:
+        lo = [p for p in points if float(p.get(key) or 0.0) <= cut]
+        hi = [p for p in points if float(p.get(key) or 0.0) > cut]
+        return {'cut': cut, 'within': None, 'low': lo, 'high': hi,
+                'n_low': len(lo), 'n_high': len(hi)}
+    lo, hi, cuts = [], [], {}
+    for p in points:
+        g = p.get(within)
+        c = cut.get(g, 0.0) if isinstance(cut, dict) else cut
+        cuts[g] = c
+        (lo if float(p.get(key) or 0.0) <= c else hi).append(p)
+    return {'cut': cuts, 'within': within, 'low': lo, 'high': hi,
             'n_low': len(lo), 'n_high': len(hi)}
 
 

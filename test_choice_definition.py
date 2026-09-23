@@ -82,6 +82,36 @@ def test_disagreement_ignores_option_labels_it_never_sees():
     assert _close(q.forecast_disagreement(a), 0.0)
 
 
+def test_normalisation_uses_the_tight_bound_not_the_weight_entropy_alone():
+    """D <= min(H(w), log2 k). Dividing by H(w) alone understates a saturated
+    point: four accounts maximally opposed over TWO options have H(w) = 2 bits
+    but can only ever reach 1, so H(w) alone would report 0.5 for a population
+    that is as split as the option set allows."""
+    d = [{'A': 1.0, 'B': 0.0}, {'A': 0.0, 'B': 1.0},
+         {'A': 1.0, 'B': 0.0}, {'A': 0.0, 'B': 1.0}]
+    assert _close(q.forecast_disagreement(d), 1.0)
+    assert _close(q.forecast_disagreement(d, normalise=True), 1.0)
+
+
+def test_more_options_can_score_higher_which_is_why_type_matters():
+    """The confound the within-type stratification exists for: a choice type
+    offering more options can reach a higher raw score for free."""
+    two = [{'A': 1.0, 'B': 0.0}, {'A': 0.0, 'B': 1.0}]
+    four = [{'A': 1.0}, {'B': 1.0}, {'C': 1.0}, {'D': 1.0}]
+    assert q.forecast_disagreement(four) > q.forecast_disagreement(two)
+
+
+def test_stratification_can_be_resolved_within_choice_type():
+    """A single corpus-wide cut on a raw statistic would sort partly BY TYPE."""
+    pts = [{'kind': 'a', 'disagreement': 0.1}, {'kind': 'a', 'disagreement': 0.9},
+           {'kind': 'b', 'disagreement': 1.6}, {'kind': 'b', 'disagreement': 1.9}]
+    within = q.stratify_by_disagreement(pts, {'a': 0.5, 'b': 1.7}, within='kind')
+    assert within['n_low'] == 2 and within['n_high'] == 2
+    globalcut = q.stratify_by_disagreement(pts, 0.5)
+    assert globalcut['n_high'] == 3, "a global cut puts both of type b in high"
+    assert within['n_low'] + within['n_high'] == len(pts), "still not a filter"
+
+
 # -- clause 3: are the listed options distinguishable? ----------------------
 
 def test_separability_reads_the_max_over_accounts_not_the_mean():
