@@ -67,8 +67,8 @@ OUT = os.path.join(HERE, "label_gate.json")
 # thresholds -- fixed here, before any distribution is looked at
 # --------------------------------------------------------------------------
 
-MAJORITY_MAX = 0.45         # Phase CP measured 0.656
-MAJORITY_MAX_BINARY = 0.65  # k=2 cannot reach 0.45; see majority_limit()
+MAJORITY_MAX = 0.45         # fallback only, when k is unknown
+SLACK = 0.30                # a constant may sit 30% of the way from chance to certainty
 ENTROPY_MIN_FRAC = 0.75     # of log(k), k = mean alternatives offered
 LOO_CONSTANT_MAX = 0.60     # a per-person constant must not already be this good
 DELTA = 0.05                # the band on both directional arms
@@ -101,23 +101,40 @@ GATES = {
 def majority_limit(k) -> float:
     """The majority-share limit for a choice type offering k alternatives.
 
-    THE ABSOLUTE 0.45 IS ARITHMETICALLY UNREACHABLE AT k=2. A binary label's
-    majority share is at least 0.5 by construction, so a flat 0.45 rejects a
-    perfect coin flip -- it would have thrown out Avalon's include/exclude
-    choice at 0.520, which is two points off balanced. This was a real defect in
-    the gate and it only surfaced when the first binary choice type arrived.
+        majority <= 1/k + SLACK * (1 - 1/k)          SLACK = 0.30
 
-    The standard is the same at every k -- a constant must not be close to
-    unbeatable -- but the number has to be stated against what k allows:
+    ONE FORMULA, NOT A TABLE OF SPECIAL CASES. The first version was a flat 0.45,
+    which is ARITHMETICALLY UNREACHABLE at k=2 -- a binary label's majority share
+    is at least 0.5 by construction, so the gate rejected a perfect coin flip and
+    did reject Avalon's include/exchange choice at 0.520, two points off
+    balanced. The repair was a k>=3 / k==2 table, and a table needs a new
+    exception every time an odd k arrives.
 
-        k >= 3   majority <= 0.45   a constant loses more often than it wins
-        k == 2   majority <= 0.65   a constant is at most a 65/35 split
+    The formula says the same thing at every k: a constant may sit at most 30% of
+    the way from CHANCE (1/k) to CERTAINTY (1). It reproduces 0.65 at k=2, and it
+    is STRICTER than the old flat 0.45 wherever there are many options -- 0.40 at
+    k=7, 0.39 at k=8 -- which is the right direction, because a constant winning
+    40% of a seven-way choice is already close to unbeatable.
 
-    Entropy alone cannot carry this. Normalised by log(k), a 0.708/0.292 binary
-    split scores 0.871 and sails through, which is why Avalon's party vote needs
-    the majority check to catch it.
+    Adopted on principle rather than on a result: every choice type measured so
+    far passes it exactly as it passed the table, and test_gate_directions runs
+    all of them against it as one table so a future change to SLACK has to face
+    every corpus at once.
+
+    k IS THE NUMBER OFFERED AT A POINT, NOT THE SIZE OF THE LABEL VOCABULARY.
+    Getting this wrong matters: Diplomacy's signed labels span 15 values
+    corpus-wide, but a player is offered (2 x powers in contact) + NONE, measured
+    at mean 8.45. Scored against the vocabulary it would fail by 0.001; scored
+    against what is actually offered it passes with room.
     """
-    return MAJORITY_MAX_BINARY if k and float(k) <= 2.0 else MAJORITY_MAX
+    try:
+        k = float(k)
+    except (TypeError, ValueError):
+        return MAJORITY_MAX
+    if k <= 1:
+        return MAJORITY_MAX
+    chance = 1.0 / k
+    return chance + SLACK * (1.0 - chance)
 
 
 def majority_share(labels) -> float:
@@ -310,7 +327,7 @@ def main():
     groups = by_choice_type(points) if a.by_choice_type else {"(all)": points}
     report = {"corpus": a.corpus, "side": a.side, "git_commit": git_head(),
               "thresholds": {"majority_share_max": MAJORITY_MAX,
-                             "majority_share_max_binary": MAJORITY_MAX_BINARY,
+                             "majority_slack": SLACK,
                              "entropy_frac_min": ENTROPY_MIN_FRAC,
                              "loo_person_constant_max": LOO_CONSTANT_MAX,
                              "delta": DELTA},

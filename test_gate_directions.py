@@ -130,27 +130,54 @@ def test_loo_is_pooled_not_averaged_over_people():
     assert acc > 0.9, f"the 30-point constant should dominate, got {acc}"
 
 
-def test_majority_limit_is_k_aware_because_0_45_is_unreachable_at_k2():
-    """A binary label's majority share is >= 0.5 by construction, so a flat 0.45
-    rejects a perfect coin flip. This was a real defect and it only surfaced when
-    the first binary choice type arrived -- Avalon's include/exclude at 0.520,
-    two points off balanced, would have been thrown out."""
+def test_majority_limit_is_a_formula_not_a_table():
+    """majority <= 1/k + SLACK*(1 - 1/k): a constant may sit at most 30% of the
+    way from chance to certainty.
+
+    The first version was a flat 0.45, which is ARITHMETICALLY UNREACHABLE at
+    k=2 -- a binary label's majority share is at least 0.5 -- so it rejected a
+    perfect coin flip. The repair was a k>=3/k==2 table, and a table needs a new
+    exception whenever an odd k arrives. One formula does not.
+    """
+    assert abs(g.majority_limit(2) - 0.65) < 1e-9, "reproduces the binary case"
     assert g.majority_limit(2) > 0.5, "an unreachable limit is not a gate"
-    assert g.majority_limit(7) == g.MAJORITY_MAX
-    assert g.majority_limit(3) == g.MAJORITY_MAX
+    # monotone: more options means a constant must do less well
+    lims = [g.majority_limit(k) for k in (2, 3, 4, 7, 8, 15)]
+    assert all(a > b for a, b in zip(lims, lims[1:])), lims
+    # stricter than the old flat 0.45 wherever there are many options
+    assert g.majority_limit(7) < 0.45 and g.majority_limit(8) < 0.45
 
 
-def test_the_k_aware_gate_gives_the_right_verdict_on_every_measured_corpus():
-    """One table, so a threshold change has to face every corpus at once."""
-    cases = [("phase_cp", 0.656, 7.0, False), ("casino_allocation", 0.2337, 7.0, True),
-             ("casino_deal_response", 0.8510, 4.0, False),
-             ("diplomacy_signed", 0.3478, 15.0, True),
-             ("diplomacy_pair", 0.7594, 3.0, False),
-             ("avalon_party_vote", 0.7083, 2.0, False),
-             ("avalon_include_exclude", 0.5203, 2.0, True)]
+def test_k_is_what_is_offered_not_the_label_vocabulary():
+    """Diplomacy's signed labels span 15 values corpus-wide, but a player is
+    offered (2 x powers in contact) + NONE, measured at mean 8.45. Scored
+    against the vocabulary it fails by 0.001; against what is offered it passes.
+    """
+    assert 0.3478 > g.majority_limit(15), "vocabulary-k would reject it"
+    assert 0.3478 <= g.majority_limit(8.45), "offered-k accepts it"
+
+
+def test_the_gate_gives_the_right_verdict_on_every_measured_corpus():
+    """One table, so a change to SLACK has to face every corpus at once."""
+    cases = [("phase_cp", 0.6560, 7, False),
+             ("casino_deal_response", 0.8510, 4, False),
+             ("casino_allocation", 0.2337, 7, True),
+             ("diplomacy_pair", 0.7594, 3, False),
+             ("diplomacy_attack_only", 0.4395, 8, False),
+             ("diplomacy_signed", 0.3478, 8.45, True),
+             ("avalon_party_vote", 0.7083, 2, False),
+             ("avalon_include_exclude", 0.5203, 2, True)]
     for name, maj, k, should_pass in cases:
         got = maj <= g.majority_limit(k)
         assert got == should_pass, f"{name}: majority {maj} at k={k} -> {got}"
+
+
+def test_the_formula_vindicates_the_signed_diplomacy_label_independently():
+    """Signed was adopted on semantic grounds -- `Germany` cannot mean both
+    attacking and supporting Germany. The formula reaches the same place from
+    the label distribution alone: attack-only now fails, signed passes."""
+    assert 0.4395 > g.majority_limit(8), "attack-only fails the formula"
+    assert 0.3478 <= g.majority_limit(8.45), "signed passes it"
 
 
 def test_entropy_alone_cannot_carry_a_binary_choice_type():

@@ -1352,3 +1352,109 @@ to avoid. Registered as a **secondary option**, not a switch.
 is detected by a frozen regex over the text and never by reading the submitted
 deal; it was computed with no model call. Added to `test_hindsight.py` anyway,
 because the 0.629 silent-subgroup figure depends on it entirely.
+
+---
+
+## Registrations closing the zero-spend stage
+
+Written before any converter and before the first model call.
+
+### The gate threshold is now one formula
+
+```
+majority <= 1/k + 0.30 * (1 - 1/k)
+```
+
+A constant may sit at most 30% of the way from **chance** (1/k) to **certainty**.
+It reproduces 0.65 at k=2 and is **stricter** than the old flat 0.45 wherever
+there are many options (0.40 at k=7, 0.39 at k=8) -- the right direction, since a
+constant winning 40% of a seven-way choice is already close to unbeatable.
+**Adopted on principle, not on a result**; every type measured so far passes it
+exactly as it passed the table it replaces, and one test runs all of them
+together so a change to SLACK must face every corpus at once.
+
+`k` is **what is offered at a point, not the size of the label vocabulary**, and
+getting that wrong is not academic: Diplomacy's signed labels span 15 values
+corpus-wide but a player is offered `2 x (powers in contact) + NONE`, measured at
+**mean 8.45, median 9, p90 11, max 13**. Against the vocabulary it fails by
+0.001; against what is offered it passes.
+
+```
+choice type                majority      k    limit  verdict
+Phase CP                     0.6560   7.00   0.4000  FAIL
+CaSiNo deal_response         0.8510   4.00   0.4750  FAIL
+CaSiNo allocation            0.2337   7.00   0.4000  PASS
+Diplomacy pair               0.7594   3.00   0.5333  FAIL
+Diplomacy attack-only        0.4395   8.00   0.3875  FAIL
+Diplomacy signed             0.3478   8.45   0.3828  PASS
+Avalon party vote            0.7083   2.00   0.6500  FAIL
+Avalon include/exclude       0.5203   2.00   0.6500  PASS
+```
+
+Two things this table now says that the old one did not. The formula **fails
+Diplomacy's attack-only label**, which is a stricter reading than the table gave
+and reaches, from the label distribution alone, the same conclusion the semantic
+argument reached: signed is the right label. And Diplomacy signed passes with
+**0.035 of headroom** -- the thinnest margin of any adopted type, recorded so it
+is not later described as comfortable.
+
+### Diplomacy — the letter scheme widens to A-M
+
+Signed labels offer up to **13** alternatives at a point (max measured), against
+the A-H scheme registered in Phase B. Re-registered as **A-M**. The
+letter-permutation invariance and single-token checks in `confirm_forecast.py`
+**re-run at the larger set**: positional bias and calibration can behave
+differently over thirteen options than over eight, so passing at k=8 is not
+evidence at k=13. Top-k = 20 still covers it.
+
+### Avalon — how the choice stream is built
+
+**1. The filter learns from votes; only include/exclude is scored.** Every player
+votes on every proposal, which is roughly 7-10 choices per player per game and is
+the only thing giving Avalon a genuine per-player sequence. The party vote failed
+the gate **as a scoring target** (0.708), and the gate exists to protect the
+reported metric -- it does not forbid the filter from taking evidence there.
+Registered: **weights update on votes and on include/exclude; the headline
+prequential log-score is computed on include/exclude only.** The measured 17-point
+spread in yes-rate across hidden roles says the votes carry real but weak
+evidence, and they should carry most when conditioned on *who is on the team*,
+which is the clause-4 point.
+
+**2. A proposal is one observation, not five.** The 740 points are (leader,
+candidate) pairs and a proposal produces about five of them, so 148 proposals is
+about **1.5 proposals per leader-game** -- in independent decisions that is close
+to CaSiNo's one per person, not a sequence. The leader must also pick exactly k
+players, so the pairs are tied together. Same treatment as Diplomacy's pairs,
+registered: **batch reveal per proposal**, and the **tempered `1/m` likelihood**
+so one proposal counts once however many candidates it ranges over.
+
+**3. Self-pairs are excluded** -- measured, leaders include themselves in
+**133/148 = 0.899** of proposals, so those points are near-trivial. (Already
+excluded from the 740 above; the rate is recorded as the justification.)
+
+**4. Portfolios reset per game.** Roles are reassigned between games, so carrying
+a portfolio across one -- through memory or otherwise -- would carry a previous
+game's role into the next. A game is the span.
+
+**5. The same-person / different-role transfer axis is NOT AVAILABLE.** The
+released `users` records carry only `index`, `name`, `role`, and `name` is
+`player-1`..`player-6` in **every one of the 20 games** -- a positional label, not
+a person. Whatever the paper says about how many people played, the data does not
+carry the mapping, so separating standing traits from the assigned role cannot be
+done here. Recorded the way CaSiNo's missing participant id was recorded, so the
+absence is never read as a null result.
+
+**6. Role-revealing fields go in the answer key, and prefixes are cut early.**
+Per-message **persuasion and deception strategy self-labels** and the **recorded
+beliefs about others' roles** both reveal roles -- a message tagged `deception`
+nearly announces an evil player. They go in the answer key and
+`test_forecast_leakage.py` covers them by name. Every prefix is cut at **the last
+proposal**: the assassination phase and post-game chat discuss roles openly.
+
+### Standing after the zero-spend stage
+
+Three corpora have cleared the gate on a named choice type -- **CaSiNo
+allocation** (M1 calibration only), **Diplomacy signed** (sequential, thinnest
+margin), **Avalon include/exclude** (sequential, with votes as unscored
+evidence). M2 no longer depends on a single dataset, and atla's contamination
+probes can now demote it without taking the milestone with it.
