@@ -603,7 +603,7 @@ can end with no valid test and nobody notices until the end.
 | CaSiNo deal responses fail the gate | concessions carry M1, or CaSiNo drops to the silent subgroup only |
 | **CaSiNo fails the `context_neutral` headroom gate** (plausible -- negotiators state their priorities aloud) | CaSiNo drops to the silent subgroup only; if that subgroup misses its MDE, CaSiNo is calibration-only and contributes no measurement |
 | **smeeple transcripts turn out to be generated from the personas** | smeeple is **dropped**, not caveated. Recovering scripted concealment is circular |
-| **smeeple consent is not documented** | smeeple stays internal and de-identified; the worked example uses a non-smeeple case |
+| **smeeple consent** | SETTLED, see "Recorded decisions": the deliverable is internal, so smeeple is used identified and carries the worked example. The scope condition is recorded there |
 | both long-timeline corpora fail | M2's sequential half is **not reported**. M1 stands alone as a likelihood-validation result, and that is stated as the result |
 
 ### The bloomfield / boeing taxonomy, fixed now
@@ -750,3 +750,220 @@ would mean something.
 Pre-registered as the one named subgroup, so it cannot be a post-hoc rescue a
 second time: **revealed preference**, the only Phase CP generator whose
 swapped-control lift was negative (-0.045 against a real +0.094).
+
+---
+
+## What counts as a CHOICE — one definition, checked per corpus
+
+Phase CP extracted 787 "choice points" and the run landed on a constant. Two
+readings survive that: the motives were empty, or the MOMENTS were, and nothing
+in the run could separate them. The extraction rule was written per corpus and
+never stated as a general property, so there was nothing to check it against.
+
+**A choice is a moment, identifiable from what came before, where the person had
+at least two genuinely feasible and distinguishable courses of action, and where
+plausible motives would favour different ones.**
+
+Four clauses, each with a place it is enforced and, where possible, a number.
+
+| # | clause | what it rules out | enforced by |
+|---|---|---|---|
+| **C1** | **identifiable from what came before** | a point defined by what the person did. Defining it by the response silently excludes everyone who ignored the request -- the behaviour most likely to hide a motive | the trigger rules below; `test_hindsight.py`; `ChoiceStream.prefix` |
+| **C2** | **genuinely feasible** | options the person could not actually have taken -- an illegal Diplomacy order, accepting a deal nobody offered | the per-corpus feasibility rule; Diplomacy's map adjudicator |
+| **C3** | **distinguishable** | option sets that are one action written twice, which inflate the count without adding a decision | `prequential.option_separability`, reported per corpus |
+| **C4** | **plausible motives would favour different ones** | dramatic-looking moments where every account predicts the same thing | `prequential.forecast_disagreement`, reported and stratified |
+
+### The trigger rule for every corpus
+
+Written now, so no corpus gets a rule invented after its numbers are seen.
+
+| corpus | trigger (C1 -- all input-side) | feasibility (C2) | outcomes |
+|---|---|---|---|
+| **CaSiNo** | partner submits a deal (deal response), or the person submits one (concession) | a deal response needs a deal on the table; `Walk-Away` is always available | `Accept` / `Reject` / `Walk-Away` / `Counter`; concessions: which issue gives ground, or none |
+| **Diplomacy** | the player exchanged messages with power P this phase, one point per (player, P) pair | **map adjudicator** -- only legal supports and attacks are listed | `support` / `attack` / `neither` |
+| **atla** | **a character is asked, ordered, offered or challenged by another character** | the other character is present in the scene and the action is available in it | `comply` / `refuse` / `deflect` / `counter-propose` / `escalate` / `no response in scene` / `OTHER` |
+| **bloomfield / boeing** | a request or disagreement is directed at the person | the person is present in the channel and addressed | `comply` / `counter-propose` / `defer` / `escalate` / `decline` / `no response in window` / `OTHER` |
+| **smeeple** | as bloomfield | as bloomfield | as bloomfield |
+
+The atla and bloomfield outcome sets are deliberately parallel: the
+generalisation claim is comparative across corpora, and two differently-shaped
+taxonomies would make the comparison a comparison of taxonomies. `deflect`
+covers changing the subject or joking it away; `escalate` covers raising the
+stakes or striking first. `OTHER` is always listed, always scored, and its rate
+always reported -- a point whose actual action is not among the alternatives is
+**never discarded**, because that is selection on the outcome.
+
+### C4, measured
+
+At each choice point, the population's forecasts disagree by
+
+```
+D = H( sum_i w_i p_i )  -  sum_i w_i H( p_i )        bits
+```
+
+the Jensen-Shannon divergence of the population, which is exactly the mutual
+information between *which account is right* and *which action is taken*. It is
+zero if and only if every account forecasts identically, and bounded above by
+`H(w) <= log2(n)`; the normalised form divides by `H(w)` so corpora with
+different population sizes are comparable.
+
+**It is reported and stratified, never used to select.** Dropping
+low-disagreement points would discard exactly the moments the population found
+uninformative and report the remainder as if it were the task -- the same error
+as conditioning on "the majority action was not taken". Every point stays in
+exactly one stratum and both are reported (`test_choice_definition.py` asserts
+that nothing is dropped).
+
+**The cut is frozen on dev**: the median of the dev disagreement distribution,
+stated as a rule and its resolved value written into `label_gate.json`.
+Re-cutting on test would let the boundary move to wherever the lift happened to
+be.
+
+**Pre-registered prediction, so the stratification cannot be read after the
+fact.** If the motives are doing discriminating work, **lift concentrates in the
+high-disagreement stratum**. If lift is flat across the two strata, the motives
+are not discriminating between moments even if the pooled number is significant,
+and that is reported as the result. If the corpus is mostly low-disagreement, the
+finding is about the **corpus** -- as Phase CP's was -- and the honest report
+says so rather than quoting the pooled lift.
+
+---
+
+## New situations — the test the time split does not perform
+
+Forecasting well on familiar situations does not show a model would forecast
+well once something changes, which is the whole point of asking what somebody
+would do. The dev/test split in `splits_v2.json` cuts on **time**, so the test
+side still contains the same KINDS of moment as the dev side; a model that had
+simply memorised "in situations like this, this person does that" would pass it.
+
+Two transfer axes, both pre-registered, reported beside the pooled number.
+
+**T1 -- leave-one-situation-type-out (LOTO).** Situation type is a categorical
+label on the choice point, taken from the **input** and fixed before any
+forecast. Motives are seeded on every type except T and forecast only on T.
+
+| corpus | situation type held out |
+|---|---|
+| CaSiNo | negotiation phase: opening / bargaining / closing. Seeded on the first two, tested on closing, where `Walk-Away` and `Accept` live |
+| Diplomacy | relationship state with that power: allied / neutral / hostile, from recent orders. The interesting hold-out is motives learned while allied, tested after the relationship turned |
+| atla | trigger type: asked / ordered / offered / challenged |
+| bloomfield / boeing / smeeple | request type, and channel |
+
+**T2 -- cross-span transfer.** Motives learned on one thread or span of a person,
+forecast on another span of the SAME person. This is the standing-motive claim
+and the closest available check on "would this still be true elsewhere".
+Available on Diplomacy, atla, bloomfield and boeing. **Not available on CaSiNo**,
+which has no persistent participant id and one dialogue per person -- stated here
+so its absence is not later read as a null result.
+
+**Decision.** M2's headline is reported **pooled AND per held-out type**. A
+method whose lift vanishes under T1 has not shown it generalises to new
+situations, **however significant the pooled lift is**, and the report says so
+in those words. Neither axis may be dropped after its number is seen.
+
+**Power.** LOTO shrinks n by construction, so the MDE is computed per held-out
+type on the partitioned size, not on the whole. A type below its MDE is reported
+as **exploratory**, never as a measurement. The `placebo` and `swap` controls are
+recomputed **within each held-out type** -- a control measured on the pooled
+distribution is not a control for the stratum.
+
+**Predicted failure mode.** Reporting a pooled lift that is carried entirely by
+one situation type, and calling it a person model. Caught by T1 being mandatory
+rather than exploratory, and by the per-stratum controls.
+
+---
+
+## Recorded decisions
+
+Both taken by the project owner, recorded here because each changes what may be
+reported and neither should have to be reconstructed later.
+
+- **CaSiNo is acquired into `data/`** (public, CC-BY-4.0) and converted by
+  `casino_ingest.py`.
+- **smeeple is used identified, including as the deliverable's worked example.**
+  The scope this rests on is that **the deliverable is internal**: this repo and
+  its reports are not published outside the organisation. The corpus contains a
+  real child and inferred private concerns about him, so if the deliverable is
+  ever taken outside that boundary, consent and de-identification become
+  preconditions again and this entry is the record of what the decision assumed.
+  The **provenance** precondition is unaffected and still blocking: if the
+  transcripts turn out to have been generated from the personas rather than the
+  personas written from a real recording, `hidden_concerns` is a script and
+  recovering it is circular, so smeeple is dropped rather than caveated.
+
+---
+
+# OUTCOME — Phase L on CaSiNo (no-model half; written after measuring, predictions unedited)
+
+`data/casino/casino.json`, 1,030 dialogues, 2,060 participants, mean 13.9 turns.
+Two candidate choice types were counted **before any forecasting was budgeted**,
+per the standing instruction to count structured-only points first rather than
+assume a volume.
+
+### deal_response — **FAILS**, and the pre-registered branch applies
+
+```
+n = 1,181 over 1,084 people, k = 4
+
+  Accept-Deal 1005   Reject-Deal 167   Walk-Away 9   Counter 0   Keep-Talking 0
+
+  [FAIL] majority_share      0.8510   must be <= 0.45
+  [FAIL] entropy_frac        0.3254   must be >= 0.75
+  [PASS] loo_person_constant 0.0567
+```
+
+**0.851 is worse than Phase CP's 0.656.** `Counter` and `Keep-Talking` never
+occur: the other party's next turn after a `Submit-Deal` is always one of
+accept / reject / walk away, so the option set is a three-way choice that is
+85% one label. This is the `HOLD` problem again, and it was found for the price
+of reading the file.
+
+Per the decision table row "CaSiNo deal responses fail the gate": deal responses
+are **dropped**, and the allocation choice carries M1.
+
+### allocation — **PASSES** all three no-model checks
+
+The choice is *which issue the proposer claims the largest share of*, read from
+`task_data.issue2youget` at each `Submit-Deal`. Ties are their own labels rather
+than being broken, because a deal that claims two issues equally is a different
+claim from one that picks a favourite.
+
+```
+n = 1,181 over 1,084 people, k = 7
+
+  Water 276  Firewood 274  Food 235
+  Firewood+Water 130  Food+Water 130  Firewood+Food 119  all-three 17
+
+  [PASS] majority_share      0.2337   must be <= 0.45
+  [PASS] entropy_frac        0.9137   must be >= 0.75
+  [PASS] loo_person_constant 0.0542   must be <= 0.60
+```
+
+This is also the choice that bears directly on the hidden label, which is itself
+close to uniform -- all six priority orders fall between 0.163 and 0.171 across
+2,060 participants. A corpus whose ground truth is balanced and whose choice
+labels are balanced cannot be won by a constant, which is the property Phase CP
+lacked.
+
+`options_only` and `context_neutral` are still **pending**; they need the model
+and run on a 100-point dev sample before extraction is scaled.
+
+### CaSiNo cannot carry any sequential claim — sharper than the plan assumed
+
+```
+structured points per person   mean 1.15   median 1   max 13
+Submit-Deals per person        1: 1,025 people   2: 40   3+: 19
+concession points (a 2nd+ offer by the same person, corpus-wide)   97
+```
+
+The plan said "the filter barely runs here -- 2-5 choice points per person". The
+measured figure is a **median of one**. There is no sequence to filter on the
+structured path, and "concession relative to the previous offer" is not a viable
+choice type either: 97 points corpus-wide, over roughly 90 people.
+
+**CaSiNo is therefore Milestone 1 only, and that is now a measurement rather
+than an expectation.** Its job is to validate the choice likelihood and the
+recovery of a known priority order one-shot. Every sequential claim -- the
+filter, the operators, marginal churn, transfer -- rests on atla, Diplomacy and
+the bloomfield contingency, and no M2 number may be quoted from CaSiNo.

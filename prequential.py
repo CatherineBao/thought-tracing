@@ -34,6 +34,7 @@ import argparse
 import collections
 import glob
 import json
+import math
 import os
 import statistics as st
 
@@ -199,6 +200,125 @@ def gate0(pool="production_config"):
                  "reported separately above; the two are never interchangeable."),
         "per_run": sorted(rows, key=lambda r: -r["marginal_churn_per_100"]),
     }
+
+
+# --------------------------------------------------------------------------
+# what makes a moment a CHOICE -- clause 4, measured
+# --------------------------------------------------------------------------
+#
+# PREREG defines a choice as a moment, identifiable from what came before, where
+# the person had at least two genuinely feasible and distinguishable courses of
+# action, AND WHERE PLAUSIBLE MOTIVES WOULD FAVOUR DIFFERENT ONES. The first
+# three clauses are properties of the extraction rule and are checked there. The
+# fourth is a property of the moment that can only be read after the forecasts
+# exist, so it is measured here and REPORTED, never used to select.
+
+
+def _h(p, base=2.0):
+    """Shannon entropy of a distribution given as a mapping or a sequence."""
+    vals = list(p.values()) if hasattr(p, 'values') else list(p)
+    tot = sum(vals)
+    if tot <= 0:
+        return 0.0
+    out = 0.0
+    for v in vals:
+        q = v / tot
+        if q > 0:
+            out -= q * math.log(q, base)
+    return out
+
+
+def forecast_disagreement(distributions, weights=None, normalise=False):
+    """How much the competing accounts disagree at one choice point, in bits.
+
+    Jensen-Shannon divergence of the population's forecasts:
+
+        D = H( sum_i w_i p_i )  -  sum_i w_i H( p_i )
+
+    which is exactly the mutual information between "which account is right" and
+    "which action is taken". It is zero if and only if every particle forecasts
+    identically -- i.e. the moment does not distinguish the hypotheses, whatever
+    the transcript looks like -- and it is bounded above by H(w) <= log2(n).
+
+    THIS IS A DIAGNOSTIC, NOT A FILTER. Dropping low-disagreement points would be
+    selection on the model's own output: it would discard exactly the moments the
+    population found uninformative and report the average of what is left as if
+    it were the average of the task. The same error as conditioning on "the
+    majority action was not taken". Points are STRATIFIED by it and both strata
+    are reported.
+
+    normalise=True divides by H(w), giving the fraction of the disagreement the
+    population could possibly express. Use it when comparing corpora whose
+    populations differ in size or concentration; the raw figure is not
+    comparable across those.
+    """
+    dists = [d for d in distributions if d]
+    if len(dists) < 2:
+        return 0.0
+    keys = sorted({k for d in dists for k in d})
+    if weights is None:
+        weights = [1.0 / len(dists)] * len(dists)
+    weights = [float(w) for w in weights][:len(dists)]
+    tot = sum(weights)
+    if tot <= 0:
+        return 0.0
+    weights = [w / tot for w in weights]
+
+    mixture = {k: sum(w * d.get(k, 0.0) for w, d in zip(weights, dists)) for k in keys}
+    d = _h(mixture) - sum(w * _h(d) for w, d in zip(weights, dists))
+    d = max(0.0, d)                      # float error only; the quantity is >= 0
+    if normalise:
+        hw = _h(weights)
+        return (d / hw) if hw > 0 else 0.0
+    return d
+
+
+def option_separability(distributions):
+    """Per option PAIR, the largest gap any single account puts between them.
+
+    Clause 3 of the definition -- "distinguishable" -- stated operationally: if
+    no account in the population ever separates two listed options, then as far
+    as anything here can tell they are one action written twice, and offering
+    both inflates the option count without adding a decision.
+
+    Reads the MAXIMUM over accounts rather than the mean, deliberately: one
+    account that separates a pair is enough to make the pair a real fork, and a
+    mean would let a crowd of indifferent accounts hide it.
+
+    Caveat, and it is a real one: this measures whether the MODEL separates the
+    options, not whether a person would. A pair that scores zero is a prompt to
+    look at the option set by hand, not a proof that the options are identical.
+    """
+    dists = [d for d in distributions if d]
+    keys = sorted({k for d in dists for k in d})
+    out = {}
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            out[(a, b)] = max((abs(d.get(a, 0.0) - d.get(b, 0.0)) for d in dists),
+                              default=0.0)
+    return out
+
+
+def disagreement_cut(dev_values, quantile=0.5):
+    """The low/high split point, FROZEN ON DEV before test is read.
+
+    A median split is a rule, not a number, so it is stated as the rule and the
+    resolved value is written down. Re-cutting on test would let the stratum
+    boundary move to wherever the lift happened to be.
+    """
+    vals = sorted(float(v) for v in dev_values)
+    if not vals:
+        return 0.0
+    k = max(0, min(len(vals) - 1, int(round(quantile * (len(vals) - 1)))))
+    return vals[k]
+
+
+def stratify_by_disagreement(points, cut, key='disagreement'):
+    """Split points into the two pre-registered strata. Both are reported."""
+    lo = [p for p in points if float(p.get(key) or 0.0) <= cut]
+    hi = [p for p in points if float(p.get(key) or 0.0) > cut]
+    return {'cut': cut, 'low': lo, 'high': hi,
+            'n_low': len(lo), 'n_high': len(hi)}
 
 
 # --------------------------------------------------------------------------
