@@ -6,10 +6,11 @@ from rich import print
 from rich.panel import Panel
 
 from trace_log import new_particle_id
+from portfolio import Portfolio, PortfolioError
 
 
 class HypothesisV3():
-    def __init__(self, target_agent: str, contexts: List[str], perceptions: List[dict], text: str, weight: float, parent_hypothesis: 'HypothesisV3' = None, anchor: str = None, particle_id: str = None, raw_accumulator: float = None, lineage_id: str = None, standard: str = None, method: str = None):
+    def __init__(self, target_agent: str, contexts: List[str], perceptions: List[dict], text: str, weight: float, parent_hypothesis: 'HypothesisV3' = None, anchor: str = None, particle_id: str = None, raw_accumulator: float = None, lineage_id: str = None, standard: str = None, method: str = None, portfolio: 'Portfolio' = None):
         self.target_agent = target_agent
         self.contexts = contexts
         # self.context_history = context_history
@@ -80,9 +81,79 @@ class HypothesisV3():
         self.raw_accumulator = raw_accumulator if raw_accumulator is not None else 0.0
         self.anchor_revisions = 0
         self.operators = []
+        # PORTFOLIO (v2, optional). None on the default path, which is what keeps
+        # every existing construction, dump, chart and audit unchanged -- the
+        # portfolio is carried BESIDE the single-anchor fields, never instead of
+        # them, and `anchor`/`standard`/`method` stay populated from the
+        # priority-1 motive so merge_similar's jaccard, weight_chart, memory.py
+        # and dedupe_anchors keep reading what they always read.
+        self.portfolio = None
+        if portfolio is not None:
+            # founds_root=False: root_id was already decided above by the
+            # parent/lineage rules, and a fresh mint here would make every
+            # propagation look like a new hypothesis.
+            self.set_portfolio(portfolio, founds_root=False)
+        elif parent_hypothesis is not None and getattr(parent_hypothesis, 'portfolio', None) is not None:
+            # Propagation inherits the account. copy() is DEEP (motives are
+            # mutable objects) but keeps both motive identities, so an inherited
+            # portfolio is the same account continued, not a new one.
+            self.set_portfolio(parent_hypothesis.portfolio.copy(), founds_root=False)
 
     def note_operator(self, name: str):
         self.operators.append(name)
+
+    # -- portfolio (v2) ---------------------------------------------------
+
+    @property
+    def motives(self):
+        """The motives held, or None on the default path.
+
+        `h.motives is not None` is the one test callers branch on, so it is a
+        view rather than a second stored list -- a stored copy is exactly how
+        HypothesesSetV3.texts drifted from the objects it mirrored.
+        """
+        return self.portfolio.motives if self.portfolio is not None else None
+
+    @property
+    def priority(self):
+        return self.portfolio.priority if self.portfolio is not None else None
+
+    @property
+    def pinned(self):
+        return bool(self.portfolio is not None and self.portfolio.pinned)
+
+    def set_portfolio(self, portfolio: 'Portfolio', founds_root: bool = True):
+        """Install a portfolio and resync the derived single-anchor fields.
+
+        THE ONLY LEGAL WAY TO CHANGE A PORTFOLIO PARTICLE'S COMMITMENTS.
+        update_anchor raises on a portfolio particle precisely so an inherited
+        call cannot leave `anchor` pointing at a motive the portfolio no longer
+        holds.
+
+        ROOT IDENTITY FOLLOWS THE MOTIVE SET, NOT THE ORDER. A changed set is a
+        different account and founds a new root; a reorder is a claim about how
+        conflicts resolve and keeps it. Making a reorder root-founding would mint
+        roots on an operator v2 exists to encourage, reinstating the birth/death
+        churn the portfolio was introduced to remove.
+
+        THE PINNED PARTICLE NEVER RE-MINTS. Its content is re-extracted from the
+        prefix periodically so it does not fossilise over a long timeline, and a
+        scheduled content change that minted a root would put a population-wide
+        birth into the churn series on a timer. Its weight carries across the
+        re-extraction and it is excluded from the primary marginal; both are
+        deliberate deviations, recorded in PREREG.
+        """
+        portfolio.validate()
+        previous = self.portfolio
+        changed = previous is None or previous.canonical_key() != portfolio.canonical_key()
+        self.portfolio = portfolio
+        primary = portfolio.primary
+        self.anchor = primary.anchor
+        self.standard = primary.standard
+        self.method = primary.method
+        if changed and founds_root and not portfolio.pinned:
+            self.root_id = new_particle_id()
+        return self
 
     def update_standard(self, new_standard):
         if new_standard:
@@ -106,6 +177,18 @@ class HypothesisV3():
         keeps both. Regenerating diversity is the perturbation's job, which is
         why resampling and repair have cleanly opposed roles.
         """
+        if self.portfolio is not None:
+            # A portfolio particle's anchor is DERIVED from its priority-1
+            # motive. Letting an inherited caller write it directly would leave
+            # the two disagreeing with nothing printing -- the same silent
+            # desync HypothesesSetV3.texts already produced once. split_and_merge
+            # and revive_retired both reach update_anchor, so ChoiceTracer
+            # overrides those two explicitly rather than reusing them; this raise
+            # is what makes a missed override a failure instead of a corrupt
+            # marginal.
+            raise PortfolioError(
+                "update_anchor is not valid on a portfolio particle; "
+                "use set_portfolio() so anchor, standard and method stay in step")
         changed = new_anchor is not None and new_anchor != self.anchor
         self.anchor = new_anchor
         # A new commitment brings its own standard; without this the particle
@@ -139,7 +222,7 @@ class HypothesisV3():
         return f"Text: {self.text} Weight: {self.weight}"
 
 class HypothesesSetV3():
-    def __init__(self, target_agent: str, contexts: List[dict], perceptions: List[dict], texts: List[str], weights, parent_hypotheses: List[HypothesisV3] = None, previous_ess: float = None, weight_details: dict = None, anchors: List[str] = None, accumulators: List[float] = None, lineage_ids: List[str] = None, methods: List[str] = None, **kwargs):
+    def __init__(self, target_agent: str, contexts: List[dict], perceptions: List[dict], texts: List[str], weights, parent_hypotheses: List[HypothesisV3] = None, previous_ess: float = None, weight_details: dict = None, anchors: List[str] = None, accumulators: List[float] = None, lineage_ids: List[str] = None, methods: List[str] = None, portfolios: List['Portfolio'] = None, **kwargs):
         self.target_agent = target_agent
         self.contexts = contexts
         self.perceptions = perceptions
@@ -161,6 +244,12 @@ class HypothesesSetV3():
             anchors = anchors + [None] * (n - len(anchors))
         if len(methods) < n:
             methods = methods + [None] * (n - len(methods))
+        # Portfolios pad with None like every other per-particle list, so a
+        # default-path set is byte-identical to before: every particle gets
+        # portfolio=None and HypothesisV3 skips the whole v2 branch.
+        portfolios = list(portfolios) if portfolios is not None else [None] * n
+        if len(portfolios) < n:
+            portfolios = portfolios + [None] * (n - len(portfolios))
         if len(accumulators) < n:
             accumulators = accumulators + [None] * (n - len(accumulators))
         if parent_hypotheses is not None:
@@ -169,14 +258,14 @@ class HypothesesSetV3():
                 parents = parents + [None] * (n - len(parents))
             self.hypotheses = [
                 HypothesisV3(target_agent, contexts, perceptions, text, weight, parent_hypothesis=parent,
-                             anchor=anchor, raw_accumulator=acc, lineage_id=lid, method=meth)
-                for text, weight, parent, anchor, acc, lid, meth in zip(texts, weights, parents, anchors, accumulators, lineage_ids, methods)
+                             anchor=anchor, raw_accumulator=acc, lineage_id=lid, method=meth, portfolio=pf)
+                for text, weight, parent, anchor, acc, lid, meth, pf in zip(texts, weights, parents, anchors, accumulators, lineage_ids, methods, portfolios)
             ]
         else:
             self.hypotheses = [
                 HypothesisV3(target_agent, contexts, perceptions, text, weight, parent_hypothesis=None,
-                             anchor=anchor, raw_accumulator=acc, lineage_id=lid, method=meth)
-                for text, weight, anchor, acc, lid, meth in zip(texts, weights, anchors, accumulators, lineage_ids, methods)
+                             anchor=anchor, raw_accumulator=acc, lineage_id=lid, method=meth, portfolio=pf)
+                for text, weight, anchor, acc, lid, meth, pf in zip(texts, weights, anchors, accumulators, lineage_ids, methods, portfolios)
             ]
         # ANCHOR == ROOT, enforced at founding too. Two founding particles that
         # carry the SAME commitment are one hypothesis explored twice, not two,
@@ -187,7 +276,16 @@ class HypothesesSetV3():
         if parent_hypotheses is None:
             canon = {}
             for h in self.hypotheses:
-                key = (h.anchor or '').strip().lower()
+                # On a portfolio run the identity of a founding particle is its
+                # MOTIVE SET, not its priority-1 anchor: two seeds holding the
+                # same three motives in different orders are one account
+                # explored twice at seed time, and the anchor alone would also
+                # collapse two genuinely different accounts that happen to share
+                # a top motive.
+                if h.portfolio is not None:
+                    key = h.portfolio.canonical_key()
+                else:
+                    key = (h.anchor or '').strip().lower()
                 if not key:
                     continue
                 if key in canon:
@@ -211,6 +309,15 @@ class HypothesesSetV3():
     @property
     def methods(self):
         return [getattr(h, 'method', None) for h in self.hypotheses]
+
+    @property
+    def portfolios(self):
+        return [getattr(h, 'portfolio', None) for h in self.hypotheses]
+
+    @property
+    def any_portfolio(self):
+        """True on a v2 run. The one branch callers test before reading motives."""
+        return any(p is not None for p in self.portfolios)
 
     def update_anchors(self, new_anchors, revision: bool = False, founds_root: bool = True):
         self.anchors = list(new_anchors)
@@ -246,7 +353,7 @@ class HypothesesSetV3():
         weights = self.weights
         if hasattr(weights, 'tolist'):
             weights = weights.tolist()
-        return {
+        out = {
             'target_agent': self.target_agent,
             'contexts': self.contexts,
             'perceptions': self.perceptions,
@@ -268,6 +375,14 @@ class HypothesesSetV3():
             'methods': self.methods,
             'accumulators': self.accumulators,
         }
+        # Emitted ONLY on a portfolio run. A default-path dump is byte-identical
+        # to before, which matters because read_steps rehydrates old logs against
+        # the newer schema and every logged finding was written against this
+        # shape.
+        if self.any_portfolio:
+            out['portfolios'] = [p.to_dict() if p is not None else None
+                                 for p in self.portfolios]
+        return out
 
     def __iter__(self):
         return iter(self.hypotheses)
@@ -332,11 +447,28 @@ def resample_hypotheses_with_other_info(hypotheses: HypothesesSetV3, ess: float)
     parents = [hypotheses.hypotheses[idx] for idx in resampled_idxs]
     anchors = [hypotheses.hypotheses[idx].anchor for idx in resampled_idxs]
     accumulators = [hypotheses.hypotheses[idx].raw_accumulator for idx in resampled_idxs]
+    # A resample duplicate is a COPY of an account, not a new one, so it keeps
+    # both motive identities -- regenerating diversity is perturbation's job.
+    # The copy must be DEEP: motives are mutable objects, so a shared reference
+    # would let a later edit to one duplicate silently mutate the other, which
+    # is the same class of bug as the texts/anchors desync.
+    #
+    # NOTE the pinned particle is NOT protected here. systematic_resample only
+    # guarantees a copy at w >= 1/n, so a pinned particle that has lost weight
+    # can be dropped by this function. ChoiceTracer resamples the non-pinned
+    # slots over renormalised non-pinned weights and carries the pinned particle
+    # through at its own weight; that deviation lives there, not in the shared
+    # resampler, so the default path keeps textbook systematic resampling.
+    portfolios = [
+        (hypotheses.hypotheses[idx].portfolio.copy()
+         if getattr(hypotheses.hypotheses[idx], 'portfolio', None) is not None else None)
+        for idx in resampled_idxs
+    ]
     weight_detail_prompts = [hypotheses.weight_details['prompts'][idx] for idx in resampled_idxs]
     weight_detail_predictions = [hypotheses.weight_details['reasonings'][idx] for idx in resampled_idxs]
     weight_details = {'prompts': weight_detail_prompts, 'reasonings': weight_detail_predictions} #, 'evaluations': weight_detail_evaluations}
 
-    resampled_hypotheses = HypothesesSetV3(target_agent, hypotheses.contexts, hypotheses.perceptions, texts, weights, parent_hypotheses=parents, previous_ess=ess, weight_details=weight_details, anchors=anchors, accumulators=accumulators)
+    resampled_hypotheses = HypothesesSetV3(target_agent, hypotheses.contexts, hypotheses.perceptions, texts, weights, parent_hypotheses=parents, previous_ess=ess, weight_details=weight_details, anchors=anchors, accumulators=accumulators, portfolios=portfolios)
 
     # Flag every copy after the first so viz can hatch duplicates and the
     # frozen-duplicate failure stays visible if it returns.

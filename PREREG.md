@@ -453,3 +453,300 @@ changes:
 - Nothing here is tuned against this split. The corpora keep their dev/test
   assignment.
 
+
+---
+
+# VERSION 2 — the choice-point filter with portfolio particles
+
+v1 closed on P-14: the per-step rank scorer picks a different best hypothesis on
+72% of steps, so stability, memory and alpha are all downstream of an evidence
+signal that reshuffles. Phase CP then tried a different evidence unit and went
+VOID, diagnosed as a degenerate label distribution (~70% `HOLD`) rather than
+leakage.
+
+v2 changes the evidence unit AND the particle: the filter runs at **choice
+points**, each particle is a **portfolio** of 1–3 co-existing motives in priority
+order, and a particle's likelihood is **the probability it gave the action the
+person actually took**, recorded before the reveal.
+
+Every entry below follows the template above. Two rules are promoted from the
+Phase CP outcome into standing rules for all of v2:
+
+- **The tripwire compares `blind` to `majority`, never to chance.**
+- **The bar is never `obvious` alone** on a task with a dominant class.
+
+---
+
+## Gate 0 — is motive marginal mass churn-invariant by construction?
+
+Written BEFORE the measurement; the three verdict bands below were fixed in
+`prequential.py:gate0()` and committed to the function body before it was
+executed. This is a **diagnostic on already-frozen data with no tunable
+parameter**, not a blocker: its job is to tell every later phase how to read a
+churn number.
+
+**What is being asked.** The M2 gate was drafted as "motive-marginal churn far
+below the old 55.6 argmax churn". That is not a legal comparison on its face — a
+new metric is always free to look better than an old one, and standing rules 1
+and 3 both bite. But the question is answerable for free, because a motive's
+marginal mass on a **one-motive portfolio is its root's mass**, every v1 particle
+**is** a one-motive portfolio, and `read_steps` rehydrates old logs. So the v2
+metric can be computed retrospectively on the frozen v1 pool, through the same
+`portfolio.py` code path v2 will use.
+
+**Metric.** Median marginal churn per 100 steps over the `production_config`
+pool, computed by `prequential.py --gate0`.
+
+**Pass threshold.** Three bands, fixed in advance:
+
+| band | reading |
+|---|---|
+| median < 5.0 | **VACUOUS** — churn-invariance is a property of the metric, not of portfolios. M2 is restated before any spend |
+| within ±2.0 of the frozen figure | **REPRODUCES** — same quantity, so the M2 comparison is like-for-like |
+| otherwise | **DIVERGES** — not the same quantity; resolve why before either is used as a gate |
+
+**Control arm.** Lineage-level churn on the same runs, reported beside it. If the
+two were interchangeable the plan's premise would be wrong in the other
+direction.
+
+**Decision.** On REPRODUCES: M2 may be stated as a churn comparison, with churn
+reported as a **diagnostic** and prequential lift as the gate. On VACUOUS: M2 is
+restated before anything is built. On DIVERGES: neither number is used until the
+difference is explained.
+
+**Predicted failure mode.** Reading a number that is low because the metric
+cannot move, and calling it stability. Caught by the VACUOUS band and by
+`runs_at_zero`.
+
+---
+
+# OUTCOME (written after scoring; predictions above unedited)
+
+```
+pool production_config    75 runs, 1,829 steps
+
+marginal churn / 100      median 55.5556   mean 55.9375   range 23.0769 - 81.4815
+runs at zero churn        0
+lineage churn / 100       median 42.3077          <-- a DIFFERENT metric
+frozen argmax churn / 100 56.4103                 delta -0.8547
+```
+
+**VERDICT: REPRODUCES.** Marginal churn and the frozen root-level figure are the
+same quantity on one-motive portfolios. **Zero runs sit at zero churn**, so the
+metric is not free — it is measuring the same instability v1 measured, and a
+fall in it under v2 would mean something.
+
+**A correction to the v2 plan, found by writing this check.** The plan asserted
+that `baseline_metrics.json`'s 56.41 is computed on `lineage_id` by
+`trace_log.argmax_churn`. **It is not.** `baseline_snapshot.read_run` computes its
+own churn on `top_root` taken from `roots_of()`, which sums weight per **root**,
+so the frozen figure was already root-level and the like-for-like number existed
+all along. `trace_log.argmax_churn` is a separate lineage-level metric and reads
+**42.31** on the same pool — 13 points apart, which is exactly how much damage
+swapping them would have done. Both are reported by `--gate0` from here on so the
+substitution cannot be made silently again.
+
+The residual −0.85 against `baseline_snapshot` is **reported, not reconciled**,
+following the rule already applied to the PRECHECKS deltas: the two differ in
+tie-breaking and in how particles with a null `root_id` are skipped. Tuning
+`prequential.py` until the numbers matched would be fitting the measurement to
+the claim.
+
+---
+
+## v2 standing rules, added to the six above
+
+7. **The tripwire compares `blind` to `majority`, never to chance.** Recovering
+   the class prior is free; only beating it indicates the option phrasing
+   carries the answer. Implemented in `label_gate.check_options_only`.
+8. **The bar is never `obvious` alone** on a task with a dominant class, and it
+   is **frozen on dev** before test is read. A bar taken as a pointwise max at
+   the realised outcome is not a proper score and is biased against every arm.
+9. **Every LLM arm carries its own dev-fitted temperature**, and the epsilon cap
+   on per-item log-score contributions is applied identically to every arm
+   including the bar. Calibrating one arm and not the others converts a
+   calibration gain into apparent lift.
+10. **Subsample whole UNITS, never choice points.** The filter is sequential;
+    dropping points from inside a person's timeline scores a filter that skipped
+    its own history.
+11. **The v2 path is `choice_tracer.py` + `run_choice.py`.** `tracer.py`'s
+    `_trace` is not modified. Enforced by `test_default_path.py`, which pins
+    golden hashes of the rank-scorer, standard-block, seeding, split and perturb
+    prompts.
+
+### Frozen artifacts, v2 additions
+
+| File | What it fixes | Verify with |
+|---|---|---|
+| `label_gate.json` | the label distribution a corpus was cleared on | `python label_gate.py --corpus X --side dev --by-choice-type` |
+| `forecast_backend.json` | the pinned forecaster and the checks it passed | `python confirm_forecast.py --gemini` |
+| `splits_v2.json` | dev/test, M1/M2 partitions and units for the new corpora | `python make_splits.py --check-v2` |
+
+`splits.json` and `baseline_metrics.json` are **not regenerated**. Adding a v2
+corpus to either would make every existing `--check` fail, which is the drift
+alarm working correctly.
+
+---
+
+## The decision table — written before any v2 number is read
+
+It is entirely plausible that CaSiNo stays calibration-only, atla is demoted to
+diagnostics, and Diplomacy is late. Without this table the generalisation claim
+can end with no valid test and nobody notices until the end.
+
+| outcome | the claim becomes |
+|---|---|
+| **M1 fails on CaSiNo** | **STOP.** Do not build the filter on an untested signal -- that was v1's mistake. Either revise the forecaster (calibration, prompt, letter scheme) and re-run M1, or report the negative and halt. No M2 work proceeds |
+| all corpora pass their gates | the generalisation claim, reported per corpus |
+| atla contaminated | claim rests on Diplomacy plus the CaSiNo silent subgroup; atla is diagnostics only |
+| **Diplomacy fails the label gate** | promote `bloomfield` / `boeing` -- private, so they cannot be memorised, and Phase CP failed there on label degeneracy, not contamination. Their taxonomy is fixed below, not chosen after seeing Diplomacy fail |
+| CaSiNo deal responses fail the gate | concessions carry M1, or CaSiNo drops to the silent subgroup only |
+| **CaSiNo fails the `context_neutral` headroom gate** (plausible -- negotiators state their priorities aloud) | CaSiNo drops to the silent subgroup only; if that subgroup misses its MDE, CaSiNo is calibration-only and contributes no measurement |
+| **smeeple transcripts turn out to be generated from the personas** | smeeple is **dropped**, not caveated. Recovering scripted concealment is circular |
+| **smeeple consent is not documented** | smeeple stays internal and de-identified; the worked example uses a non-smeeple case |
+| both long-timeline corpora fail | M2's sequential half is **not reported**. M1 stands alone as a likelihood-validation result, and that is stated as the result |
+
+### The bloomfield / boeing taxonomy, fixed now
+
+The choice point is defined by **the request or disagreement directed at the
+person** -- part of the *input* -- and never by their having responded to it.
+Defining it by the response would exclude the cases where somebody **ignored**
+the request, which is the behaviour most likely to hide a motive; that is the
+same outcome-selection error as discarding a choice point whose actual action
+was not among the generated alternatives. Outcomes:
+
+```
+comply | counter-propose | defer | escalate | decline | no response in window | OTHER
+```
+
+Deliberately **not** Phase CP's seven-way taxonomy, whose `HOLD` absorbed 70% of
+the mass. `no response in window` is recoverable rule-based from `addressed_to`.
+`OTHER` is scored and its rate reported. The label gate applies per choice type.
+
+**Note on the existing extractor.** `choice_points.validate` currently rejects a
+record when `actual not in seen` ("actual not among the alternatives"). That is
+selection on the outcome: it keeps only the predictable choices, inflates every
+arm, and deletes exactly the behaviour being looked for. Every v2 converter
+emits an explicit `OTHER` alternative instead, and reports the `OTHER` rate.
+
+---
+
+## Phase L — the label gate (per corpus, per choice type)
+
+Written BEFORE any v2 corpus was converted.
+
+**What is being changed.** Nothing in the filter. This is a hard precondition on
+the task, run on **dev only**, before any forecasting spend.
+
+**Metric.** Five checks computed by `label_gate.py`, three of which need no
+model call.
+
+| check | threshold | direction |
+|---|---|---|
+| majority-class share | <= 0.45 | lower passes |
+| normalised entropy, over alternatives OFFERED | >= 0.75 x log(k) | higher passes |
+| pooled leave-one-out accuracy of a per-person constant | <= 0.60 | lower passes |
+| `options_only` | <= majority + 0.05 | **lower passes** -- above it the phrasing leaks |
+| `context_neutral` sanity / headroom | >= majority - 0.05 **and** <= ceiling - 0.05 | **higher / lower** |
+
+The two model arms run on a 100-point dev sample before extraction is scaled.
+
+**Pass threshold.** All five, per choice type. A corpus that passes in aggregate
+while one kind inside it is a constant has not passed.
+
+**Control arm.** The Phase CP distribution itself, as a regression fixture:
+70% `HOLD`, blind 0.622, obvious 0.533, majority 0.656. The gate must reject it,
+must NOT flag it as leakage, and must fail it on the bar.
+
+**Decision.** On pass: forecasting may be budgeted. On fail: the corpus takes its
+row in the decision table. **No prompt is tuned against a failed gate** -- the
+extraction or the corpus is the problem, not the wording.
+
+**Predicted failure mode.** Inverting one of the two lookalike arms and killing a
+usable corpus, or clearing a degenerate one. Caught by `test_gate_directions.py`,
+which drives each gate with a value that must fail it.
+
+---
+
+# OUTCOME (written after scoring; predictions above unedited)
+
+No v2 corpus has been converted yet, so no corpus has been gated. What HAS run
+is the regression fixture, in `test_gate_directions.py`:
+
+```
+Phase CP replayed through label_gate:
+
+  majority_share       0.700   FAIL   (the finding: 70% HOLD)
+  entropy_frac         0.314   FAIL
+  loo_person_constant  ~1.000  FAIL
+  options_only         0.622   PASS   <-- blind LOST to majority 0.656
+  context_neutral      0.533   FAIL   <-- the bar was below a constant
+  overall                      FAIL
+```
+
+The gate reproduces Phase CP's own post-hoc diagnosis from its own numbers: the
+option phrasing did **not** leak, and the pre-registered bar was the problem.
+Had this gate existed, that run would have stopped before the first of its 2,481
+forecasts.
+
+---
+
+## Phase B — forecaster confirmation — **NOT RUN**
+
+Blocked until `forecast_backend.json` shows `confirmed: true`. Recorded now so
+the dependency is visible.
+
+The forecast answers with a single option letter `A`-`H`: one token in any
+tokenizer, so one call returning top-k log-probs at that position gives an exact
+normalised distribution over the alternatives (k=20 covers eight, which is also
+why Diplomacy's choice unit is at most seven powers plus `HOLD`). Action labels
+are **not** scored -- they are multi-token with different lengths, which is the
+bias `ContinuationScore.mean` already exists to correct.
+
+Six checks, four inherited from §0.3 and two new:
+
+| check | meaning for a distribution |
+|---|---|
+| aligned | top-k sits at the answer position; returned letters are a subset of those offered; the first output token is forced to be the letter; thinking mode off and its interaction with log-probs verified |
+| responsive | a portfolio naming the taken option's aim puts more mass on it than a scrambled portfolio does on the same prompt |
+| ordered | more mass on an alternative after the context that licenses it than after one that does not |
+| deterministic | two identical requests agree **within a declared tolerance**. Exact float identity will not hold on a hosted API, so the check is restated rather than silently relaxed |
+| **letter-permutation invariance** | the same choice point under two letter assignments induces the same distribution over ACTIONS. Without this a positional prior on "A" reads as a motive effect |
+| **calibration** | a reliability curve on dev plus a dev-fitted temperature **per arm**. Letter probabilities are typically overconfident, often near 1.0; that turns reweighting into hard argmax updates -- bringing back the churn v2 exists to reduce -- and makes log-scores dominated by the epsilon cap |
+
+**Sampled frequency is not a viable production fallback**, and this is arithmetic
+rather than preference: at `eps_frac = 0.12` and n = 6 the epsilon floor is
+~0.02, so a sampling resolution of 1/K needs K > n/eps_frac ~ 50 or sampling
+noise, not the floor, binds the weight update. It is used for the offline
+pipeline and these checks only. If `response_logprobs` does not work, the honest
+options are a coarse declared ranking over alternatives, or pause.
+
+---
+
+## Phase M1 / M2 — **NOT RUN**
+
+Recorded as stubs so the ordering is on the record. Neither may be filled in
+until `label_gate.json` and `forecast_backend.json` both pass for the corpus in
+question, and the bar, the merge floor, the collapse tripwire and the surprise
+margin are frozen on dev.
+
+**M1** -- one-shot, no filter, CaSiNo. Metric: prequential log-score lift over
+the frozen bar, pooled, clustered permutation on the person. Controls: `placebo`
+(the binding one -- Phase CP's failure was a think-harder effect, which only a
+generic same-shape portfolio isolates) and `swap`, with the swap bands corrected
+for expected overlap (one in six random swaps shares the exact priority order,
+half share the top item). Bands reused verbatim from Phase CP: `swap >= real` ->
+CONTROL MOVED WITH IT; `0.5 x real <= swap < real` -> WEAK; `swap < 0.5 x real`
+-> EFFECT, and the same bands applied to `placebo`.
+
+**M2** -- the filter with portfolios. Gate: prequential lift per corpus, never
+pooled. **Churn is a diagnostic, not the gate** -- "marginal churn far below v1"
+rewards a frozen population, which is the opposite of what shift detection needs.
+Stability is reported as *changes only when the evidence does*: the correlation
+between per-step churn and likelihood-ratio magnitude. Gate 0 established that
+marginal churn on the v1 pool reads 55.56 with zero runs at zero, so a fall in it
+would mean something.
+
+Pre-registered as the one named subgroup, so it cannot be a post-hoc rescue a
+second time: **revealed preference**, the only Phase CP generator whose
+swapped-control lift was negative (-0.045 against a real +0.094).
