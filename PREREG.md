@@ -280,3 +280,81 @@ of the shuffle ceiling, against **1.6972 / 1.9444 = 0.873**), the pass threshold
 with its span floor, the control arm (`swapped_control.py` — the same step
 scored against a slate traced for a different person, which should *not*
 separate), and both decision branches.
+
+---
+
+## Phase CP — choice-point forecasting
+
+Written BEFORE any extraction ran. No number below has been seen.
+
+**What is being changed.** Nothing in the filter. This is a different evidence
+unit: instead of scoring hypotheses against *the observed next action* at every
+turn, hypotheses are scored against *what a person did at a moment where they
+could have done otherwise*. Choice points are extracted by an LLM over
+`bloomfield`, `boeing` and `oppenheimer`, split in time by `splits.json`, and
+thirteen generators propose motives from the earlier choices only.
+
+**Metric.** Pooled **lift** — hypothesis-arm accuracy minus `obvious`-arm
+accuracy on the same held-out choice points — computed by
+`choice_forecast.py`. Paired, one-sided McNemar exact, plus a label-permutation
+p at the family level, plus Benjamini-Hochberg q per hypothesis.
+
+**Pass threshold.** McNemar p ≤ 0.05 **and** real lift > swapped-person control
+lift. Three bands, fixed now:
+
+- `swap ≥ real` → **CONTROL MOVED WITH IT**. Not a finding.
+- `0.5 × real ≤ swap < real` → **WEAK**. Reported as weak, never as an effect.
+- `swap < 0.5 × real` → **EFFECT**.
+
+The floor this is stated against is the **swapped-person arm measured on the
+same run**, not a seed floor. Standing rule 3.
+
+**Control arms.** Four, each against a different objection:
+
+| arm | objection it answers |
+|---|---|
+| `habit` | "you discovered that people repeat themselves" |
+| `role` | "you discovered what people in this seat do" — from the record, never from the FABRICATED `*_profiles.json` |
+| `obvious` | "a careful reader would have said that anyway" — **the bar** |
+| `swap` | "the motive text is a *think harder* prompt" — the same motive forecasting a *different* person's choices |
+
+**Tripwire, checked before anything else is read.** A `blind` arm sees only the
+option labels — no transcript, no person, no situation. The extractor saw the
+outcome when it wrote the alternatives, so **if blind accuracy exceeds chance +
+0.10 the run is VOID** and no lift in it means anything.
+
+**Hand check.** `--spot-check` samples choice points and asks a human exactly
+one question: *was this a real choice*. Not whether any motive is insightful —
+a human judging insight is how the last five designs became uninterpretable.
+**Threshold: ≥ 80% judged real.** Below that the extraction is the problem and
+the forecast numbers are not interpretable.
+
+**Decision.**
+- On **EFFECT**: `SURPRISES.md` is the deliverable, and the next step is the
+  `altered_real_v1` dev side, where there is a label.
+- On **WEAK** or **CONTROL MOVED WITH IT**: report that the motive is working
+  as a prompt, not as a person model, and stop. Do not tune the motive prompt
+  against the same test split.
+- On **NO EFFECT**: report the `obvious` accuracy as the thing to beat and the
+  per-method table as the map of what did not work. The negative is the result.
+- On **VOID**: rebuild extraction so alternatives are generated without sight
+  of the outcome, then rerun. No lift from this run may be quoted.
+
+**Predicted failure modes.**
+1. *The motive is a "think harder" prompt.* Any extra text in the prompt raises
+   the arm that has it. Caught by `swap`: a generic prompt effect raises the
+   control identically.
+2. *The alternatives leak.* Caught by `blind`.
+3. *Habit eats everything.* If `habit` ≈ `obvious` ≈ hypothesis, the corpora
+   have too little behavioural variety for a motive to add anything, and the
+   honest report is about the corpora, not the method.
+4. *Surprises are luck.* With thirteen generators somebody is right on every
+   item by chance. The null is the **swapped-motive hit count on the same
+   misses**, printed beside the list; a surprise list no longer than its own
+   control is not a finding.
+
+---
+
+# OUTCOME (written after scoring; predictions above unedited)
+
+_pending_
