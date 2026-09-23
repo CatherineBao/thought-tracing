@@ -68,6 +68,7 @@ OUT = os.path.join(HERE, "label_gate.json")
 # --------------------------------------------------------------------------
 
 MAJORITY_MAX = 0.45         # Phase CP measured 0.656
+MAJORITY_MAX_BINARY = 0.65  # k=2 cannot reach 0.45; see majority_limit()
 ENTROPY_MIN_FRAC = 0.75     # of log(k), k = mean alternatives offered
 LOO_CONSTANT_MAX = 0.60     # a per-person constant must not already be this good
 DELTA = 0.05                # the band on both directional arms
@@ -96,6 +97,28 @@ GATES = {
 # --------------------------------------------------------------------------
 # label statistics -- no model calls
 # --------------------------------------------------------------------------
+
+def majority_limit(k) -> float:
+    """The majority-share limit for a choice type offering k alternatives.
+
+    THE ABSOLUTE 0.45 IS ARITHMETICALLY UNREACHABLE AT k=2. A binary label's
+    majority share is at least 0.5 by construction, so a flat 0.45 rejects a
+    perfect coin flip -- it would have thrown out Avalon's include/exclude
+    choice at 0.520, which is two points off balanced. This was a real defect in
+    the gate and it only surfaced when the first binary choice type arrived.
+
+    The standard is the same at every k -- a constant must not be close to
+    unbeatable -- but the number has to be stated against what k allows:
+
+        k >= 3   majority <= 0.45   a constant loses more often than it wins
+        k == 2   majority <= 0.65   a constant is at most a 65/35 split
+
+    Entropy alone cannot carry this. Normalised by log(k), a 0.708/0.292 binary
+    split scores 0.871 and sails through, which is why Avalon's party vote needs
+    the majority check to catch it.
+    """
+    return MAJORITY_MAX_BINARY if k and float(k) <= 2.0 else MAJORITY_MAX
+
 
 def majority_share(labels) -> float:
     """Share of the commonest label. The number that decided Phase CP."""
@@ -216,8 +239,8 @@ def evaluate(stats, options_only_acc=None, context_neutral_acc=None,
     """Combine the no-model statistics with whichever arms have been measured."""
     checks = [
         {"gate": "majority_share", "value": stats["majority_share"],
-         "limit": MAJORITY_MAX, "better": "lower",
-         "pass": stats["majority_share"] <= MAJORITY_MAX},
+         "limit": majority_limit(stats.get("mean_alternatives")), "better": "lower",
+         "pass": stats["majority_share"] <= majority_limit(stats.get("mean_alternatives"))},
         {"gate": "entropy_frac", "value": stats["entropy_frac"],
          "limit": ENTROPY_MIN_FRAC, "better": "higher",
          "pass": stats["entropy_frac"] >= ENTROPY_MIN_FRAC},
@@ -287,6 +310,7 @@ def main():
     groups = by_choice_type(points) if a.by_choice_type else {"(all)": points}
     report = {"corpus": a.corpus, "side": a.side, "git_commit": git_head(),
               "thresholds": {"majority_share_max": MAJORITY_MAX,
+                             "majority_share_max_binary": MAJORITY_MAX_BINARY,
                              "entropy_frac_min": ENTROPY_MIN_FRAC,
                              "loo_person_constant_max": LOO_CONSTANT_MAX,
                              "delta": DELTA},

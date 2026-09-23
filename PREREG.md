@@ -1162,3 +1162,193 @@ the choice cannot later be mistaken for a result.
   account knows and the reference does not. Lift in that stratum **at** placebo
   level is the think-harder effect, i.e. the Phase CP failure recurring. The
   placebo is computed within each stratum for exactly this reason.
+
+---
+
+# OUTCOME — Avalon added, and a defect it exposed in the gate itself
+
+`sstepput/Avalon-NLU` (MIT, EMNLP 2023 Findings). 20 games x 6 players, with
+**ground-truth player roles** (merlin, percival, morgana, assassin, two
+servants), party proposals, per-player party votes, quest outcomes, occasional
+player beliefs, and per-utterance persuasion/deception labels.
+
+It is the strongest hidden-motive label in the project: a role is assigned at
+setup, never stated in the transcript, and drives everything the player does.
+Added because Diplomacy was otherwise carrying the sequential claim alone and
+atla may yet fail its contamination probes.
+
+### The gate had a defect, and a binary choice type found it
+
+```
+majority share of a BINARY label is >= 0.5 BY ARITHMETIC
+```
+
+`MAJORITY_MAX = 0.45` is therefore **unreachable at k=2** -- the gate would have
+rejected a perfect coin flip, and did reject Avalon's include/exclude choice at
+0.520, two points off balanced. Entropy cannot cover for it either: normalised
+by log k, a 0.708/0.292 split scores 0.871 and sails through.
+
+**Fixed: the limit is k-aware.** The standard is unchanged -- a constant must not
+be close to unbeatable -- but the number is stated against what k allows:
+
+```
+k >= 3    majority <= 0.45     a constant loses more often than it wins
+k == 2    majority <= 0.65     a constant is at most a 65/35 split
+```
+
+Every measured choice type re-run through the corrected gate, as one table, so a
+future threshold change has to face all of them at once (`test_gate_directions`):
+
+```
+choice type                majority      k   limit  verdict
+Phase CP (7-way)             0.6560    7     0.45   FAIL
+CaSiNo deal_response         0.8510    4     0.45   FAIL
+CaSiNo allocation            0.2337    7     0.45   PASS
+Diplomacy pair               0.7594    3     0.45   FAIL
+Diplomacy attack-only        0.4395    8     0.45   PASS
+Diplomacy signed             0.3478   15     0.45   PASS
+Avalon party vote            0.7083    2     0.65   FAIL
+Avalon include/exclude       0.5203    2     0.65   PASS
+```
+
+### Avalon party vote — FAILS
+
+```
+n = 696 over 120 player-games   yes 493 / no 203 = 0.708
+  [FAIL] majority_share 0.7083 (limit 0.65)   [PASS] entropy 0.8709
+  [FAIL] loo_person_constant 0.6264
+
+yes-rate by the voter's HIDDEN ROLE:
+  servant-1 0.802 | servant-2 0.741 | assassin 0.698 | merlin 0.690
+  percival  0.690 | morgana   0.629
+```
+
+Players approve most parties, and the **hidden role moves the marginal vote rate
+by only ~17 points across all six roles**. That second number is the more
+informative one: it is a direct corpus-level read on clause 4, and it says the
+raw vote label carries little of what the role determines.
+
+### Avalon include/exclude — PASSES, and is adopted
+
+For each proposal, one point per (leader, other player): did the leader put them
+on the party. Base rate is favourable by construction -- parties are 2 to 4 of 6.
+
+```
+n = 740 over 101 leader-games, k = 2, 148 proposals (sizes 2:23, 3:58, 4:67)
+  exclude 385 / include 355
+  [PASS] majority_share      0.5203   limit 0.65
+  [PASS] entropy_frac        0.9988
+  [PASS] loo_person_constant 0.4649
+  OVERALL PASS
+```
+
+**7.3 choice points per leading player**, 101 leader-games over 20 games -- a
+genuine if short sequence, far better than CaSiNo's median of one. Note the
+leader's own include-rate barely varies by role (0.459-0.529), the same signal as
+the vote: a motive model has to condition on WHO is being included, not on the
+leader's rate.
+
+Quest votes are **not usable**: only the aggregate outcome is recorded (53
+succeeded / 29 failed), never the per-player pass/fail, which is the sharpest
+motive signal in the game and simply is not in the data.
+
+---
+
+## Diplomacy, re-specified after the pair unit was dropped
+
+### The label is SIGNED, and the previous rule was wrong
+
+The adopted "primary target, attack or support" rule labelled a point `Germany`
+whether the player attacked or supported Germany -- **opposite motives under one
+label**. Neither the motive reading nor the lie metric survives that. Measured
+both ways:
+
+```
+n = 1,058 player-phases
+
+SIGNED (direction in the label, 15 labels)
+  NONE 0.348 | attack:Austria 0.104 | attack:France 0.099 | attack:Russia 0.083
+  attack:Germany 0.070 | attack:Turkey 0.067 | attack:Italy 0.064
+  attack:England 0.060 | support:* 0.105 total
+  majority 0.3478 PASS   entropy 0.8075 PASS   loo 0.3346 PASS
+
+ATTACK-ONLY (8 labels)
+  majority 0.4395 PASS   entropy 0.8494 PASS   loo 0.4036 PASS
+```
+
+Attacks carry 0.547 of the mass against support's 0.105, so the old rule was an
+attack rule with ten points of support contamination. **SIGNED is adopted**: it
+is the semantically correct label, it passes with a lower majority share, and it
+is what the lie metric needs. Per-point alternatives are (powers in contact x 2
+directions) + NONE, so the letter scheme widens from A-H to as many letters as
+the largest offered set; top-k = 20 still covers it.
+
+### Tie-breaking, reported
+
+```
+two powers drawing equal order counts
+  signed label      173 / 1,058 = 0.164
+  attack-only        74 / 1,058 = 0.070
+```
+
+**16.4% is not negligible**, and an alphabetical tie-break is label noise nobody
+could predict. Registered tie-break, in order, each visible to a forecaster in
+principle: (1) the target whose **targeted province is a supply centre**;
+(2) the target against which more total units are committed; (3) alphabetical, as
+a last resort, with the residual rate reported.
+
+### The lie metric, re-specified
+
+The old definition read divergence per (player, recipient, phase). That unit no
+longer exists. **New definition, registered before any forecast exists:** the
+forecast probability that the primary target is the recipient the player
+**promised not to move against**, i.e. `P(attack:R)` for a recipient R with an
+extracted non-aggression promise, scored as PR-AUC against the aggregated
+`speaker_intention`.
+
+Two ceilings, registered up front because both lower it:
+
+- it catches only betrayals aimed at the player's **primary** target; a lie
+  followed by a secondary attack is invisible;
+- it reads only **"I won't attack you"** promises; a broken promise of support
+  cannot be recovered from a target label.
+
+This makes the existing rule -- **compare against `role` and `obvious`, never
+against an absolute threshold** -- load-bearing rather than cautionary.
+
+### Simultaneity is across players, not only within one
+
+Batch reveal was specified for the pairs inside one player-phase. The pair unit
+is gone, but the harder version remains: **all seven powers order simultaneously**,
+so player B's context for phase *t* must exclude player A's phase-*t* orders and
+the adjudicated results of phase *t*. That is a board-state leak, and the nonce
+test will not catch it unless the fixture contains a second player acting in the
+same phase. Added to `test_prequential.py`'s obligations.
+
+### The map
+
+The reconstruction (mean degree 12.6 against a real board's four to five) is
+replaced by the standard board from the `diplomacy` Python package (Mila), licence
+to be checked before it is vendored. It is needed for C2 -- listing feasible
+alternatives -- not for the label.
+
+---
+
+## CaSiNo, two qualifications on the early cut
+
+**The early cut lowers the achievable ceiling, and that is stated rather than
+discovered.** From three turns in, the final allocation depends on the proposer's
+priorities **and** on everything the partner does afterwards. Part of the outcome
+is not explained by the proposer's motives at all, so the lift available to any
+method is bounded below what the headroom figure suggests. Acceptable for
+calibration; recorded so the number is not read as a failure of the method.
+
+A cleaner target exists -- the proposer's **own first explicit proposal**, which
+reflects their preference more purely -- but recovering it means parsing that
+proposal, which reintroduces the hindsight concern the structured path was chosen
+to avoid. Registered as a **secondary option**, not a switch.
+
+**The cut rule reads only the input.** "The first explicit allocation proposal"
+is detected by a frozen regex over the text and never by reading the submitted
+deal; it was computed with no model call. Added to `test_hindsight.py` anyway,
+because the 0.629 silent-subgroup figure depends on it entirely.

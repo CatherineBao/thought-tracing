@@ -130,6 +130,37 @@ def test_loo_is_pooled_not_averaged_over_people():
     assert acc > 0.9, f"the 30-point constant should dominate, got {acc}"
 
 
+def test_majority_limit_is_k_aware_because_0_45_is_unreachable_at_k2():
+    """A binary label's majority share is >= 0.5 by construction, so a flat 0.45
+    rejects a perfect coin flip. This was a real defect and it only surfaced when
+    the first binary choice type arrived -- Avalon's include/exclude at 0.520,
+    two points off balanced, would have been thrown out."""
+    assert g.majority_limit(2) > 0.5, "an unreachable limit is not a gate"
+    assert g.majority_limit(7) == g.MAJORITY_MAX
+    assert g.majority_limit(3) == g.MAJORITY_MAX
+
+
+def test_the_k_aware_gate_gives_the_right_verdict_on_every_measured_corpus():
+    """One table, so a threshold change has to face every corpus at once."""
+    cases = [("phase_cp", 0.656, 7.0, False), ("casino_allocation", 0.2337, 7.0, True),
+             ("casino_deal_response", 0.8510, 4.0, False),
+             ("diplomacy_signed", 0.3478, 15.0, True),
+             ("diplomacy_pair", 0.7594, 3.0, False),
+             ("avalon_party_vote", 0.7083, 2.0, False),
+             ("avalon_include_exclude", 0.5203, 2.0, True)]
+    for name, maj, k, should_pass in cases:
+        got = maj <= g.majority_limit(k)
+        assert got == should_pass, f"{name}: majority {maj} at k={k} -> {got}"
+
+
+def test_entropy_alone_cannot_carry_a_binary_choice_type():
+    """Normalised by log k, a 0.708/0.292 split scores 0.871 and sails through.
+    That is why Avalon's party vote needs the majority check to catch it."""
+    labels = ['yes'] * 708 + ['no'] * 292
+    assert g.normalised_entropy(labels, k=2) > 0.75, "entropy would pass it"
+    assert g.majority_share(labels) > g.majority_limit(2), "majority must fail it"
+
+
 # -- the regression fixture -------------------------------------------------
 
 def test_phase_cp_numbers_reproduce_their_own_diagnosis():
