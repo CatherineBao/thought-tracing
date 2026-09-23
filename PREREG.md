@@ -1458,3 +1458,33 @@ allocation** (M1 calibration only), **Diplomacy signed** (sequential, thinnest
 margin), **Avalon include/exclude** (sequential, with votes as unscored
 evidence). M2 no longer depends on a single dataset, and atla's contamination
 probes can now demote it without taking the milestone with it.
+
+### The Diplomacy map — AGPL blocked, so the reconstruction was repaired instead
+
+The canonical source (the `diplomacy` package, Mila) is **AGPL-3.0**. Too viral
+to vendor into this repo, so it is not used.
+
+The earlier reconstruction was polluted for a findable reason: it unioned a
+SUPPORT order's `to` and `from`, and `from` is the **supported unit's** province,
+which need not be adjacent to the supporter. Rebuilt from move geometry only --
+a MOVE `A->B` is an edge; a SUPPORT at `S` for `X->Y` gives `S-Y` (the supporter
+must reach the target) and `X-Y` (the supported move is itself an edge); convoys
+give no edge:
+
+```
+OLD (to + from unioned)   75 provinces   mean degree 12.6   median 13   max 22
+NEW (move geometry)       75 provinces   mean degree  7.5   median  7   max 14
+real board                75 provinces   mean degree ~4.5 per unit type
+```
+
+Seven spot checks pass, positives and negatives: PAR-BUR yes, PAR-MUN no,
+LON-NTH yes, LON-MOS no, VEN-TRI yes, SEV-BLA yes, SPA-MOS no. Written to
+`data/diplomacy/adjacency.json`.
+
+**Still approximate, and the residual bias is in the safe direction.** The union
+over fleet and army adjacency is higher than either alone, and multi-coast
+provinces collapse to one node, so the map stays somewhat permissive. That
+offers a few infeasible alternatives (a C2 cost) and **inflates k** -- and
+because the gate limit falls as k rises, an over-permissive map makes the
+threshold **harder** to pass, never easier. Recorded so the direction is not
+re-derived later.
