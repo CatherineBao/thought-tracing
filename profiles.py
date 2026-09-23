@@ -169,17 +169,6 @@ def render_profile(profiles, target: str, roster=(), include_quotes: bool = Fals
 
 SETTLES_MODES = ('assert', 'test')
 
-# Below this, a profile is not injected AT ALL.
-#
-# A HARD gate, not a graded one, and that is an empirical choice rather than a
-# stylistic one. The 'test' mode was an attempt to make the model discount a
-# prior by telling it to -- record first, note ranked weaker, admissible only
-# on silence -- and it moved adoption the WRONG way: handed someone else's
-# record, the target landed 0.08 from it, inside the same-seed noise floor.
-# Prose that asks a model to hold something lightly does not make it hold it
-# lightly. So the only lever measured to work is whether the text is there.
-DEFAULT_CONFIDENCE_GATE = 0.65
-
 
 def confidence_of(profiles, token: str):
     """The external system's own stated confidence in this record, or None."""
@@ -197,6 +186,15 @@ def gate_passes(confidence, gate) -> bool:
     A record with NO stated confidence passes: the gate is there to suppress
     reads the source itself flags as weak, not to suppress sources that do not
     report confidence. Silence is not a low score.
+
+    A HARD gate, not a graded one, and that is an empirical choice rather than
+    a stylistic one. The 'test' mode was an attempt to make the model discount
+    a prior by telling it to -- record first, note ranked weaker, admissible
+    only on silence -- and it moved adoption the WRONG way: handed someone
+    else's record, the target landed 0.08 from it, inside the same-seed noise
+    floor. Prose that asks a model to hold something lightly does not make it
+    hold it lightly. So the only lever measured to work is whether the text is
+    there: below the gate a profile is not injected AT ALL.
     """
     if gate is None:
         return True

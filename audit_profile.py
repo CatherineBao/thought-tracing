@@ -58,8 +58,6 @@ import json
 import os
 import random
 import re
-import statistics
-import sys
 
 from audit_methods import (steps_for, run_meta, founding_events, trajectories,
                            echo_for, classify, judge, CLASSES)
@@ -176,9 +174,10 @@ def blind_dump(bundles, targets, arms, path, seed=0):
             key[f"{t}/{label}"] = arm
             evs = [e for s in sorted({k[2] for k in bundles if k[0] == arm and k[1] == t})
                    for e in bundles[(arm, t, s)]["events"]]
-            transcript = transcript or transcript_for(bundles[(arm, t, shuffled and
-                                                      sorted({k[2] for k in bundles
-                                                              if k[0] == arm and k[1] == t})[0])])
+            if not transcript:
+                first_seed = sorted({k[2] for k in bundles
+                                     if k[0] == arm and k[1] == t})[0]
+                transcript = transcript_for(bundles[(arm, t, first_seed)])
             sets[label] = [
                 {"commitment": e["clause"],
                  "turns_alive": e["steps_alive"],
@@ -312,14 +311,44 @@ def head_to_head(model, transcript, target, a_clause, b_clause):
     return "TIE", True, (raw1, raw2)
 
 
-def transcript_for(bundle):
-    """The turns the filter actually scored.
+_CORPUS_CACHE = {}
 
-    Deliberately the scored actions rather than the source sets: the judge must
-    be asked whether the claim is stated in what the TRACER SAW. Rebuilding from
-    the corpus would hand it text the run never processed, and a NOT STATED
-    verdict against a different transcript is not evidence about this run.
+
+def transcript_for(bundle):
+    """THE WHOLE CONTEXT THE TRACER READ -- not the per-step scored actions.
+
+    Corrected after a measured failure. The first version joined each step's
+    `scored_action`, on the reasoning that the judge should see what the tracer
+    saw. That was wrong: a scored_action is the single turn being weighed at
+    that step, and the tracer reads the entire stitched context. On the
+    bloomfield color thread the join came to 4,535 of 33,032 characters -- 14%
+    -- and it silently dropped four speakers who are in the conversation.
+
+    The damage was not subtle. A blind auditor asked "is this stated in the
+    transcript?" ruled `Validate Patadia's resource relevance` and `Adopt
+    Saxena's storage proposal` to be claims about people who do not exist, and
+    made "hallucinated entities" its headline discriminator between arms. Both
+    are in the record: Patadia posts a resource page, Saxena argues about
+    storing point clouds. The same truncation inflates every arm's NOT STATED
+    rate, because a claim absent from 14% of a transcript is trivially
+    unquotable.
+
+    Rebuilt from the corpus by the run's own `set_ids`, which is what the
+    driver stitched and handed to the tracer. Falls back to the scored actions
+    only when the meta cannot identify the sets, and says nothing either way --
+    the caller cannot act on the difference, but a silent empty transcript
+    would make every claim NOT STATED and look like a result.
     """
+    meta = bundle.get("meta") or {}
+    corpus, set_ids = meta.get("corpus"), meta.get("set_ids")
+    if corpus and set_ids:
+        if corpus not in _CORPUS_CACHE:
+            import run_musing as _rm
+            _CORPUS_CACHE[corpus] = _rm.load_corpus(corpus)
+        by_id = _CORPUS_CACHE[corpus]["by_id"]
+        parts = [by_id[s]["full_context"] for s in set_ids if s in by_id]
+        if parts:
+            return "\n".join(parts)
     return "\n".join(st.get("scored_action") or "" for st in bundle["steps"])
 
 

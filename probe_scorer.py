@@ -41,7 +41,6 @@ def prepare(tracer, ctx, step):
     # way the real filter does. Step-0 hypotheses against a step-8 action is a
     # mismatch -- every hypothesis is irrelevant, the scorer correctly answers
     # "none of these predict it", and the fixture cannot separate scorer designs.
-    from hypothesis import HypothesesSetV3
     cur = hyps
     for j in range(1, idx + 1):
         cur = tracer.propagate(cur, state_action=traj[j], perceptions=perc[j])

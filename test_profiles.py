@@ -389,5 +389,226 @@ def test_pecho_matrix_separates_supplied_from_true():
     assert m[("scram", "Wolf")]["Lyubovsky"] > m[("scram", "Wolf")]["Wolf"]
 
 
+# --------------------------------------------------------------------------
+# the STANDARD axis (settles)
+# --------------------------------------------------------------------------
+
+V4_TOKENS = ("COLLEAGUE", "CUSTOMER", "MEASUREMENT", "DOCUMENT")
+
+
+def test_settles_never_hands_over_a_v4_token():
+    """THE CIRCULARITY GUARD, and the most important test in this file.
+
+    v4 asks the model to pick one of four tokens and eval_motive_sep bins on
+    exactly those tokens. Supplying one would make the eval score whether the
+    model can copy a word back -- which the scramble control already showed it
+    can -- rather than whether it read the person.
+    """
+    p = profiles.load_profiles("bloomfield")
+    for tok, rec in profiles.people(p).items():
+        s = rec.get("settles") or ""
+        for bad in V4_TOKENS:
+            assert bad not in s.upper(), f"{tok}'s settles leaks the token {bad}: {s!r}"
+
+
+def test_settles_rule_is_empty_without_a_profile():
+    assert profiles.settles_rule(None, "Wolf", "Wolf") == ""
+    assert profiles.settles_rule(FIX, "Nobody", "Nobody") == ""
+
+
+def test_standard_block_default_path_is_unchanged():
+    """No profile => byte-identical to before this feature."""
+    for variant in ("v1", "v2", "v3", "v4"):
+        assert (tracer.standard_block("Wolf", variant, None, settles="")
+                == tracer.standard_block("Wolf", variant, None))
+
+
+def test_settles_appends_and_does_not_replace():
+    """standard_block's own rule: the variant's output contract must survive,
+    or eval_motive_sep is measuring its lexicon instead of the people."""
+    p = profiles.load_profiles("bloomfield")
+    clause = profiles.settles_rule(p, "Wolf", "Wolf")
+    plain = tracer.standard_block("Wolf", "v4", None)
+    withp = tracer.standard_block("Wolf", "v4", None, settles=clause)
+    assert withp.startswith(plain), "variant text was modified, not appended to"
+    assert withp.endswith(clause)
+
+
+def test_settles_defers_to_the_record():
+    """A prior that overrode the transcript would be an instruction to ignore
+    evidence, which is the opposite of a prior."""
+    p = profiles.load_profiles("bloomfield")
+    clause = profiles.settles_rule(p, "Wolf", "Wolf")
+    assert "if the record contradicts it, follow the record" in clause
+
+
+def test_settles_persists_unlike_the_anchor_block():
+    """The anchor profile fires once at seeding; this must reach the standard
+    sites, which run every step."""
+    t = _seed(character_profile=True, profiles=profiles.load_profiles("bloomfield"),
+              profile_roster=["Wolf", "Lyubovsky"], profile_as=None)
+    t.trace_base_header = "[target agent]"
+    tracer.Tracer.set_tracer_variables(
+        t, {"question": "q", "context": "c", "target_agent": "Wolf"})
+    assert t._profile_settles, "settles clause not set on the tracer"
+    assert "stopped pressing" in t._profile_settles
+
+
+def test_scramble_scrambles_both_axes():
+    """Someone else's aims with their own settling conditions would be a third
+    experimental condition nobody asked for."""
+    t = _seed(character_profile=True, profiles=profiles.load_profiles("bloomfield"),
+              profile_roster=["Wolf", "Lyubovsky"], profile_as="Lyubovsky")
+    t.trace_base_header = "[target agent]"
+    tracer.Tracer.set_tracer_variables(
+        t, {"question": "q", "context": "c", "target_agent": "Wolf"})
+    # Lyubovsky's settling condition, attributed to Wolf
+    assert "reproduced or a confound" in t._profile_settles
+    assert "grower or customer accepted" not in t._profile_settles
+
+
+def test_every_traced_target_has_a_settles():
+    recs = profiles.people(profiles.load_profiles("bloomfield"))
+    for tok in ("Wolf", "Lyubovsky", "Rovani"):
+        assert recs[tok].get("settles"), f"{tok} has no settles"
+
+
+# --------------------------------------------------------------------------
+# settles_mode: prior as assertion vs prior as hypothesis
+# --------------------------------------------------------------------------
+
+def test_both_settles_modes_keep_the_circularity_guard():
+    p = profiles.load_profiles("bloomfield")
+    for mode in profiles.SETTLES_MODES:
+        for tok in ("Wolf", "Lyubovsky", "Rovani"):
+            clause = profiles.settles_rule(p, tok, tok, mode=mode)
+            for bad in V4_TOKENS:
+                assert bad not in clause.upper(), f"{mode}/{tok} leaks {bad}"
+
+
+def test_test_mode_puts_the_record_first():
+    """ORDER is the point: in 'assert' the prior was the last thing read before
+    answering, and last-read wins -- the same reason methods.py puts the form
+    constraint last."""
+    p = profiles.load_profiles("bloomfield")
+    c = profiles.settles_rule(p, "Wolf", "Wolf", mode="test")
+    i_record = c.index("from the record FIRST")
+    i_note = c.index("prior working history")
+    assert i_record < i_note, "the note still precedes the record instruction"
+
+
+def test_test_mode_ranks_the_note_below_the_record():
+    p = profiles.load_profiles("bloomfield")
+    c = profiles.settles_rule(p, "Wolf", "Wolf", mode="test")
+    assert "WEAKER source" in c
+    assert "may not override it" in c
+    # admissible only on SILENCE, not merely absent contradiction -- a record
+    # that fails to support the prior does not contradict it, and the old
+    # wording licensed the note everywhere short of head-on collision
+    assert "Only if the record does not show it" in c
+
+
+def test_modes_differ_and_assert_is_the_default():
+    p = profiles.load_profiles("bloomfield")
+    a = profiles.settles_rule(p, "Wolf", "Wolf", mode="assert")
+    t = profiles.settles_rule(p, "Wolf", "Wolf", mode="test")
+    assert a != t
+    assert profiles.settles_rule(p, "Wolf", "Wolf") == a, "default changed"
+
+
+def test_test_mode_leaves_the_output_contract_alone():
+    """eval_motive_sep bins on v4's four tokens; a mode that changed what the
+    variant asks for would make the arms incomparable."""
+    p = profiles.load_profiles("bloomfield")
+    plain = tracer.standard_block("Wolf", "v4", None)
+    for mode in profiles.SETTLES_MODES:
+        c = profiles.settles_rule(p, "Wolf", "Wolf", mode=mode)
+        assert tracer.standard_block("Wolf", "v4", None, settles=c).startswith(plain)
+
+
+def test_tracer_honours_settles_mode():
+    for mode in profiles.SETTLES_MODES:
+        t = _seed(character_profile=True, profiles=profiles.load_profiles("bloomfield"),
+                  profile_roster=["Wolf", "Lyubovsky"], profile_as=None,
+                  settles_mode=mode)
+        t.trace_base_header = "[target agent]"
+        tracer.Tracer.set_tracer_variables(
+            t, {"question": "q", "context": "c", "target_agent": "Wolf"})
+        expect = mode == "test"
+        assert ("from the record FIRST" in t._profile_settles) is expect
+
+
+# --------------------------------------------------------------------------
+# confidence gating + the validation channel
+# --------------------------------------------------------------------------
+
+def test_gate_suppresses_both_injection_points():
+    p = profiles.load_profiles("bloomfield")
+    roster = ["Wolf", "Lyubovsky", "Rovani"]
+    assert profiles.render_profile(p, "Wolf", roster, gate=0.95) == ""
+    assert profiles.settles_rule(p, "Wolf", "Wolf", gate=0.95) == ""
+    # and passes below its own confidence
+    assert profiles.render_profile(p, "Wolf", roster, gate=0.65) != ""
+    assert profiles.settles_rule(p, "Wolf", "Wolf", gate=0.65) != ""
+
+
+def test_gate_drops_low_confidence_roster_entries():
+    p = profiles.load_profiles("bloomfield")
+    roster = ["Wolf", "Lyubovsky", "Ortega"]      # Ortega is 0.50
+    assert "Ortega" in profiles.render_profile(p, "Wolf", roster)
+    assert "Ortega" not in profiles.render_profile(p, "Wolf", roster, gate=0.65)
+
+
+def test_missing_confidence_is_not_a_low_score():
+    """The gate suppresses reads the SOURCE calls weak, not sources that do not
+    report confidence at all."""
+    assert profiles.gate_passes(None, 0.65) is True
+    assert profiles.gate_passes(0.9, None) is True
+    assert profiles.gate_passes(0.5, 0.65) is False
+    assert profiles.gate_passes(0.65, 0.65) is True
+
+
+def test_default_path_is_unaffected_by_the_gate_parameter():
+    p = profiles.load_profiles("bloomfield")
+    roster = ["Wolf", "Lyubovsky"]
+    assert (profiles.render_profile(p, "Wolf", roster)
+            == profiles.render_profile(p, "Wolf", roster, gate=None))
+
+
+def test_settles_expect_never_reaches_a_prompt():
+    """THE VALIDATION CHANNEL'S CIRCULARITY GUARD.
+
+    settles_expect is the profile's falsifiable claim, scored against runs that
+    never saw the profile. If it leaked into a prompt the check would be
+    grading the model on a label it had been handed."""
+    p = profiles.load_profiles("bloomfield")
+    roster = ["Wolf", "Lyubovsky", "Rovani", "McLafferty"]
+    for tok in profiles.people(p):
+        claim = (profiles.people(p)[tok].get("settles_expect") or "").lower()
+        if not claim:
+            continue
+        for mode in profiles.SETTLES_MODES:
+            blk = (profiles.render_profile(p, tok, roster)
+                   + profiles.settles_rule(p, tok, tok, mode=mode))
+            assert claim not in blk.lower(), f"{tok}/{mode} leaks its own prediction"
+            assert "settles_expect" not in blk
+
+
+def test_every_profile_carries_a_falsifiable_claim():
+    for tok, rec in profiles.people(profiles.load_profiles("bloomfield")).items():
+        assert rec.get("settles_expect"), f"{tok} makes no checkable claim"
+        assert rec.get("read_confidence") is not None, f"{tok} states no confidence"
+
+
+def test_validator_defaults_to_record_only_runs():
+    """Pointing it at profiled runs would make it circular; the default must
+    not be a profiled run id."""
+    import validate_profiles
+    import inspect
+    src = inspect.getsource(validate_profiles.main)
+    assert '"cov4s{seed}_{person}"' in src, "default run template changed"
+    assert "cov4p" not in src, "default points at a PROFILED arm"
+
+
 if __name__ == "__main__":
     sys.exit(main())

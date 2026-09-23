@@ -1,10 +1,9 @@
-import time
 import asyncio
 import backoff
 import requests
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Tuple
+from typing import List
 
 class BaseAgent(ABC):
     def __init__(self):
@@ -89,7 +88,3 @@ class AsyncBaseAgent(BaseAgent):
 
         return responses
 
-    def batch_cot(self, prompts, temperature=None, max_tokens=None):
-        cot_prompts = [prompt.removesuffix("\nAnswer:") + self.cot_prompt for prompt in prompts]
-        cot_responses = self.batch_interact(cot_prompts, temperature, max_tokens)
-        return cot_responses

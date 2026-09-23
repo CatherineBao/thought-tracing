@@ -6,12 +6,6 @@ Gemini path required the OpenAI, Together and vLLM packages to be installed.
 """
 
 
-def _missing(name, exc):
-    def _raise(*args, **kwargs):
-        raise ImportError(f"backend '{name}' is unavailable: {exc}")
-    return _raise
-
-
 def _gpt():
     from .gpt import AsyncConversationalGPTBaseAgent, ConversationalGPTBaseAgent, O1BaseAgent, O1MiniAgent
     return AsyncConversationalGPTBaseAgent, ConversationalGPTBaseAgent, O1BaseAgent, O1MiniAgent

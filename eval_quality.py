@@ -21,7 +21,6 @@ Judged by an LLM against the two texts, with the judgement forced to cite the
 specific claim -- an unsupported verdict is discarded rather than counted.
 """
 import argparse
-import glob
 import musing_layout as ml
 import json
 import os

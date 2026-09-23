@@ -4,7 +4,7 @@ One line per lineage. A split forks the parent line into its children; a merge
 joins two lines; a perturbation ends one line and starts another (the commitment
 was replaced, so it is genuinely a different hypothesis from that turn on).
 """
-import argparse, glob, html, json, sys
+import argparse, html, json, sys
 import musing_layout as ml
 import trace_log as t
 

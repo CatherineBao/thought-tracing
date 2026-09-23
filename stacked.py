@@ -5,7 +5,7 @@ Shares the x axis and the weight axis across both panels so the two are read
 against each other rather than side by side from memory. Reuses weight_chart's
 build(), so forks, drops and removals mean the same thing in both.
 """
-import argparse, glob, html, json, re, sys
+import argparse, html, json, re, sys
 import musing_layout as ml
 import trace_log as t
 import weight_chart as wc

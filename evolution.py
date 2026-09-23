@@ -19,7 +19,6 @@ Usage:
 """
 import argparse
 import html
-import sys
 
 import musing_layout as ml
 import stacked as st

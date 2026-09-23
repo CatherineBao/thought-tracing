@@ -12,7 +12,6 @@ sandbox. What they protect, in order of importance:
      restores. Getting this wrong does not crash anything -- it silently
      misattributes every finding the audit reports.
 """
-import math
 import types
 import numpy as np
 

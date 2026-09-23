@@ -24,7 +24,6 @@ failure the anchor lifecycle was rewritten to prevent.
 import numpy as np
 
 from hypothesis import HypothesesSetV3
-import trace_log as tl
 
 TOL = 1e-9
 

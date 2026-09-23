@@ -1,76 +1,13 @@
 import os
-import time
 import together
 import backoff
 import requests
 from types import SimpleNamespace
-from .base import BaseAgent, AsyncBaseAgent
+from .base import AsyncBaseAgent
 from transformers import AutoTokenizer
 from together import Together
-from typing import List
-import asyncio
 
 client = Together(api_key=os.getenv('TOGETHERAI_API_KEY'))
-
-class TogetherAIAgent(BaseAgent):
-    def __init__(self, kwargs: dict):
-        self.api_key = together.api_key = os.getenv('TOGETHERAI_API_KEY')
-        self.args = SimpleNamespace(**kwargs)
-        self._set_default_args()
-        self.args.model = self.args.model.removesuffix("-tg")
-
-    def _set_default_args(self):
-        if not hasattr(self.args, 'temperature'):
-            self.args.temperature = 1.0
-        if not hasattr(self.args, 'max_tokens'):
-            self.args.max_tokens = 1024
-        if not hasattr(self.args, 'top_p'):
-            self.args.top_p = 1.0
-        if not hasattr(self.args, 'frequency_penalty'):
-            self.args.frequency_penalty = 0
-        if not hasattr(self.args, 'presence_penalty'):
-            self.args.presence_penalty = 0
-
-    def preprocess_input(self, text):
-        return text
-    
-    def generate(self, prompt, temperature=None, max_tokens=None):
-        output = together.Complete.create(
-            prompt=prompt,
-            model=self.args.model,
-            max_tokens = self.args.max_tokens if max_tokens is None else max_tokens,
-            temperature = self.args.temperature if temperature is None else temperature,
-        )
-
-        return output
-
-    def postprocess_output(self, output):
-        responses = [c['text'].strip() for c in output['output']['choices']]
-        return responses[0]
-
-    def preprocess_input(self, text, system_prompt=None, history=None):
-        messages = []
-        if system_prompt is not None:
-            messages.append({"role": "system", "content": f"{system_prompt}"})
-        if history is not None:
-            for idx, msg in enumerate(history):
-                if idx % 2 == 0:
-                    messages.append({"role": "user", "content": f"{msg}"})
-                else:
-                    messages.append({"role": "assistant", "content": f"{msg}"})
-        messages.append({"role": "user", "content": f"{text}"})
-        prompt = self.tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=False
-        )
-        return prompt
-
-    def interact(self, prompt, temperature=None, max_tokens=None):
-        output = self.generate(prompt, temperature=temperature, max_tokens=max_tokens)
-        response = self.postprocess_output(output)
-
-        return response
 
 class AsyncTogetherAIAgent(AsyncBaseAgent):
     def __init__(self, kwargs: dict):
@@ -122,29 +59,6 @@ class AsyncTogetherAIAgent(AsyncBaseAgent):
         response = self.postprocess_output(output)
 
         return response
-
-class AsyncGemmaAgent(AsyncTogetherAIAgent):
-    def __init__(self, kwargs: dict):
-        super().__init__(kwargs)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.args.model)
-
-    def preprocess_input(self, text, system_prompt=None, history=None):
-        messages = []
-        if history is not None:
-            for idx, msg in enumerate(history):
-                if idx % 2 == 0:
-                    messages.append({"role": "user", "content": f"{msg}"})
-                else:
-                    messages.append({"role": "assistant", "content": f"{msg}"})
-        messages.append({"role": "user", "content": f"{text}"})
-        prompt = self.tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=False
-        )
-        if system_prompt is not None:
-            prompt = prompt.replace("<bos><start_of_turn>", f"<bos><start_of_turn>system\n{system_prompt}<end_of_turn>\n<start_of_turn>")
-        return prompt
 
 class AsyncLlama3Agent(AsyncTogetherAIAgent):
     def __init__(self, kwargs: dict):

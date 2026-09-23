@@ -1,14 +1,12 @@
 # https://github.com/openai/openai-python
 import os
 import time
-import json
 import asyncio
 import openai
-import backoff
 from openai import OpenAI, AsyncOpenAI
 from types import SimpleNamespace
 from .base import BaseAgent, AsyncBaseAgent
-from typing import List, Tuple
+from typing import List
 
 class GPT3BaseAgent(BaseAgent):
     def __init__(self, kwargs: dict):
@@ -62,12 +60,6 @@ class GPT3BaseAgent(BaseAgent):
         responses = [c.text.strip() for c in outputs.choices]
 
         return responses[0]
-
-    def parse_ordered_list(self, numbered_items):
-        ordered_list = numbered_items.split("\n")
-        output = [item.split(".")[-1].strip() for item in ordered_list if item.strip() != ""]
-
-        return output
 
     def interact(self, prompt, temperature=None, max_tokens=None):
         outputs = self.generate(prompt, temperature=temperature, max_tokens=max_tokens)
@@ -227,20 +219,6 @@ class AsyncConversationalGPTBaseAgent(ConversationalGPTBaseAgent, AsyncBaseAgent
         outputs = self.batch_interact([prompt], temperature=temperature, max_tokens=max_tokens, system_prompts=system_prompt, histories=[history])
 
         return outputs[0]
-
-    def batch_cot_fauxpas_eai(self, prompts, temperature=None, max_tokens=None):
-        cot_prompts = [prompt + "\nLet's think step by step." for prompt in prompts]
-        cot_responses = self.batch_interact(cot_prompts, temperature, max_tokens)
-        prompts_with_cot = []
-        for idx, (prompt, cot_response) in enumerate(zip(prompts, cot_responses)):
-            if idx in [0, 3]:
-                prompts_with_cot.append(f'{prompt}\n{cot_response}\nAnswer with "Yes" or "No" only, without explanations. In case of doubt, answer according to the most probable answer. Therefore, the answer is:')
-            elif idx == 1:
-                prompts_with_cot.append(f'{prompt}\n{cot_response}\nAnswer with a quote only without explanations. Therefore, the answer is:')
-            elif idx == 2:
-                prompts_with_cot.append(f'{prompt}\n{cot_response}\nAnswer the question only, without explanations. Therefore, the answer is:')
-        final_responses = self.batch_interact(prompts_with_cot, temperature, max_tokens)
-        return final_responses
 
 class O1BaseAgent(AsyncConversationalGPTBaseAgent):
     def __init__(self, kwargs: dict):

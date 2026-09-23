@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 from methods import METHODS, parse_methods
-from profiles import load_profiles, render_profile, profile_meta
+from profiles import load_profiles, profile_meta
 
 # A run writing far fewer steps than its trajectory has is a FAILURE, not a
 # short run. A flat floor of 5 let a crash at step 7 of a 34-step context pass
@@ -174,7 +174,6 @@ def make_args(**overrides) -> SimpleNamespace:
         tracing_model="gemini-2.5-flash",
         model="gemini-2.5-flash",
         n_hypotheses=4,
-        target_perceptions="sight",
         use_helper_llm=False,
         existing_traces=None,
         input_is_chat=True,      # musing full_context is FANToM chat format
@@ -204,10 +203,19 @@ def make_args(**overrides) -> SimpleNamespace:
         profiles=None,                # corpus profile records, or None
         profile_roster=None,          # speakers present, most central first
         profile_as=None,              # whose profile to hand over (scramble control)
+        settles_mode='assert',        # 'assert' | 'test' -- see profiles.settles_rule
+        confidence_gate=None,         # suppress profiles the SOURCE calls weak
         legacy_form=False,            # restore pre-G2 propagation + no commitment validator
         standard_prompt='v1',         # STANDARD_PROMPTS variant; see eval_motive_sep.py
         methods=None,                 # methods.py keys; None = default prompts, unchanged
         revive_retired=False,         # expiry becomes a cache: bring a commitment back if it fits
+        # Cross-run memory. Off by default: with it off, _trace's per-run reset
+        # of _retired is untouched and every existing measurement stands.
+        memory=False,
+        memory_dir='musing_out',
+        memory_span_id=None,          # thread identity for this run's span
+        memory_checkpoint_steps=10,   # mid-run retirement flush; 0 disables
+        memory_restore_max=None,      # slots seeded from memory; None = half
         baseline_blend=0.15,          # uniform mixed back in so a null-level hypothesis survives
         surprise_perturb=False,       # mint when the null outranks every live commitment
         alpha=0.85,                   # prior exponent; ~6.7x steady-state amplification
@@ -221,7 +229,6 @@ def make_args(**overrides) -> SimpleNamespace:
         protect_leader=1,          # keep the heaviest copy of each root
         enable_expiry=False,       # weight-based retirement, off by default
         rebirth_at_fair_share=False,
-        revival_rebirth=False,        # the same reset, REVIVED particles only
         expiry_weight_frac=0.5,
         expiry_steps=6,
         merge_percentile=95.0,        # Phase 4 merge cut, resolved per run (jaccard)
@@ -311,6 +318,23 @@ def main():
     ap.add_argument("--legacy-form", action="store_true",
                     help="restore the pre-G2 propagation question and disable the commitment "
                          "validator, so the context fix can be measured on its own")
+    ap.add_argument("--memory", action="store_true",
+                    help="persist this run's commitments to a durable per-person store, "
+                         "and read it back on a later run. Off by default: with it off "
+                         "_trace's per-run reset of _retired is untouched.")
+    ap.add_argument("--memory-dir", default="musing_out",
+                    help="root of the memory store")
+    ap.add_argument("--memory-restore-max", type=int, default=None,
+                    help="how many founding slots to seed from memory. Default is "
+                         "half the population: restoring every slot would make a run "
+                         "unable to discover anything its predecessor did not hold.")
+    ap.add_argument("--memory-checkpoint-steps", type=int, default=10,
+                    help="flush retirements to the store every N steps so a crash "
+                         "mid-run does not lose them. The live set is never "
+                         "checkpointed -- see Tracer._checkpoint_memory. 0 disables.")
+    ap.add_argument("--memory-span-id", default=None,
+                    help="thread identity for this run's span. Two runs with different "
+                         "span ids are two threads, which is what consolidation counts.")
     ap.add_argument("--revive-retired", action="store_true",
                     help="treat expiry as a cache rather than a delete: when a mint fires, first "
                          "check whether a previously retired commitment would have predicted the "
@@ -326,6 +350,19 @@ def main():
                          "population and is used nowhere else, which is what an "
                          "already-held understanding of someone represents. Not named "
                          "--baseline (taken by the scorer null) and not --seed (the RNG).")
+    ap.add_argument("--settles-mode", default="assert", choices=["assert", "test"],
+                    help="how the profile's settling condition enters the STANDARD "
+                         "prompt. 'assert' states it and asks for it to be weighed -- "
+                         "MEASURED TO STEER: a scrambled clause moved the target's "
+                         "settlement mode with it. 'test' puts the record first and "
+                         "admits the note only where the record is silent.")
+    ap.add_argument("--confidence-gate", type=float, default=None, metavar="X",
+                    help="do not inject a profile whose read_confidence is below X "
+                         "(suggested 0.65). A HARD gate: hedging the wording instead was "
+                         "measured to INCREASE adoption, not reduce it, so presence or "
+                         "absence of the text is the only lever known to work. A profile "
+                         "with no stated confidence is not suppressed -- silence is not a "
+                         "low score.")
     ap.add_argument("--profile-as", default=None, metavar="TOKEN",
                     help="SCRAMBLE CONTROL: trace --target but hand the seeder "
                          "TOKEN's profile instead of their own. If commitments "
@@ -378,17 +415,6 @@ def main():
                          "collapse trigger more often (9->13 firings, 3->6 consecutive), and "
                          "cut mint survival 59%%->32%% and argmax churn 8->5. Kept as the "
                          "evidence for that finding.")
-    ap.add_argument("--revival-rebirth", action="store_true", default=False,
-                    help="the fair-share reset for REVIVED particles only. OFF by default: "
-                         "measured on bb_Rodriguez, 80 steps, two seeds a side, it lifts "
-                         "revival birth mass from 0.61-0.77 of fair share to 0.94-0.95 as "
-                         "designed, and exp_4's failure does NOT reproduce at this volume -- "
-                         "root-mass ESS straddles the control (0.759/0.837 against "
-                         "0.775/0.806) rather than falling. But nothing improves: survival "
-                         "(0.53/0.78 vs 0.31/0.73) and churn (35/44 vs 50/42) straddle too. "
-                         "Kept as the evidence that the revival-only cell is harmless and "
-                         "pointless, which is not what exp_4 predicted for it. Needs "
-                         "--revive-retired to do anything.")
     ap.add_argument("--enable-expiry", action="store_true",
                     help="retire a hypothesis held below EXPIRY_WEIGHT_FRAC/n for "
                          "EXPIRY_STEPS consecutive turns, minting a replacement")
@@ -583,7 +609,22 @@ def main():
                      character_profile=a.character_profile,
                      profiles=corpus.get("profiles"),
                      profile_as=a.profile_as,
+                     settles_mode=a.settles_mode,
+                     confidence_gate=a.confidence_gate,
                      revive_retired=a.revive_retired,
+                     memory=a.memory, memory_dir=a.memory_dir,
+                     memory_span_id=a.memory_span_id,
+                     memory_checkpoint_steps=a.memory_checkpoint_steps,
+                     memory_restore_max=a.memory_restore_max,
+                     # The span's sets, so the store can resolve a corpus-wide
+                     # ordinal for this run. Without it every span gets ordinal
+                     # 0, every pair reads adjacent, and consolidation cannot
+                     # fire -- measured, twice.
+                     span_sets=a.set_ids,
+                     # The store is namespaced by corpus; without this every
+                     # corpus writes into memory/unknown/ and Wolf's bloomfield
+                     # commitments would merge with any other corpus's Wolf.
+                     corpus=a.corpus,
                      legacy_form=a.legacy_form,
                      standard_prompt=a.standard_prompt,
                      methods=a.methods,
@@ -598,7 +639,6 @@ def main():
                      protect_leader=a.protect_leader,
                      enable_expiry=a.enable_expiry,
                      rebirth_at_fair_share=a.rebirth_at_fair_share,
-                     revival_rebirth=a.revival_rebirth,
                      expiry_weight_frac=a.expiry_weight_frac,
                      expiry_steps=a.expiry_steps)
     tracer = build_tracer(args)
@@ -651,7 +691,6 @@ def main():
             "stagnation_steps": a.stagnation_steps,
             "enable_expiry": a.enable_expiry,
             "rebirth_at_fair_share": a.rebirth_at_fair_share,
-            "revival_rebirth": a.revival_rebirth,
             "expiry_weight_frac": a.expiry_weight_frac,
             "expiry_steps": a.expiry_steps,
             "enable_split": a.enable_split,
@@ -669,6 +708,8 @@ def main():
             # true with profile_target null, which is visibly different from a
             # run that had one -- rather than both reporting the same thing.
             "character_profile": a.character_profile,
+            "settles_mode": a.settles_mode if a.character_profile else None,
+            "confidence_gate": a.confidence_gate if a.character_profile else None,
             **pmeta,
         })
         tracer.attach_logger(logger)

@@ -10,7 +10,6 @@ API, so the log reports reality rather than the intent at the call site.
 """
 import json
 import math
-import os
 import threading
 import time
 import uuid
@@ -21,7 +20,23 @@ import musing_layout
 
 
 def new_particle_id() -> str:
-    return uuid.uuid4().hex[:8]
+    """A particle/lineage/root identity, unique across runs as well as within one.
+
+    Was `hex[:8]` -- 32 bits. That is ample inside a single run and wrong for a
+    durable store. Measured over every steps.jsonl on disk: 4,839 distinct
+    root_ids, 40,641 particle-steps, and ZERO ids shared between two runs, at a
+    birthday probability of 0.27%. The same arithmetic at the sizes a
+    cross-run memory reaches gives 25% at 50k ids and 99% at 200k.
+
+    A collision inside one run is a curiosity; a collision across runs silently
+    merges two people's commitment histories under one root, and every
+    ancestral-mass and survival number computed from that root is then wrong
+    with nothing to indicate it. 64 bits puts 200k ids at ~1e-9.
+
+    Ids are opaque everywhere they are used -- nothing slices or parses them --
+    so widening is safe, and old runs keep their short ids without conflict.
+    """
+    return uuid.uuid4().hex[:16]
 
 
 # --------------------------------------------------------------------------
@@ -64,11 +79,6 @@ class _CallRecorder:
         with self._lock:
             calls, self._calls = self._calls, []
             return calls
-
-    def peek(self) -> List[Dict[str, Any]]:
-        with self._lock:
-            return list(self._calls)
-
 
 RECORDER = _CallRecorder()
 
@@ -329,6 +339,28 @@ class StepRecord:
     baseline_score: Optional[float] = None
     baseline_rank: Optional[int] = None
     best_margin: Optional[float] = None
+    # The PER-HYPOTHESIS margins over the null, not just their max.
+    #
+    # These were computed on every baseline-scored step and thrown away: only
+    # `best_margin` and the `surprise` boolean reached disk, so the shape of
+    # the population's fit -- one commitment carrying the step versus five
+    # sharing it -- was unrecoverable. Two consequences, both measured:
+    # no run on disk can be replayed to sweep a threshold over them, and the
+    # per-step lean they define could not be checked without a fresh run.
+    # Cheap to keep: n floats on a record that already carries the full prompt.
+    margins: Optional[List[float]] = None
+    # No live commitment beats the null -- best_margin <= 0 -- so any quantity
+    # built by weighting commitments BY that margin is undefined here, not
+    # merely small.
+    #
+    # DELIBERATELY NOT `surprise`, which is `best <= 0 AND not off_topic`.
+    # The two come apart exactly where it matters: on routine traffic the null
+    # wins and nothing is learned (expected, uninformative), whereas the same
+    # collapse on a turn that is NOT routine is the board failing to explain
+    # the target's own words. Measured on rrarm_s0/rrctrl_s0, 34-38% of scored
+    # steps have no defined lean, so a design that treats these as rare holes
+    # is discarding a third of its input.
+    lean_undefined: Optional[bool] = None
     ranking: Optional[List[int]] = None
     alloc_keying: Optional[str] = None
     rank_alloc_agreement: Optional[float] = None
@@ -438,56 +470,6 @@ def argmax_churn(steps: List[StepRecord], tol: float = 1e-9) -> int:
     return churn
 
 
-def kendall_tau(a: List[str], b: List[str]) -> Optional[float]:
-    """Kendall's tau between two orderings over the same items."""
-    common = [x for x in a if x in set(b)]
-    if len(common) < 2:
-        return None
-    ra = {k: i for i, k in enumerate([x for x in a if x in set(common)])}
-    rb = {k: i for i, k in enumerate([x for x in b if x in set(common)])}
-    conc = disc = 0
-    for i in range(len(common)):
-        for j in range(i + 1, len(common)):
-            x, y = common[i], common[j]
-            s_ = (ra[x] - ra[y]) * (rb[x] - rb[y])
-            if s_ > 0:
-                conc += 1
-            elif s_ < 0:
-                disc += 1
-    tot = conc + disc
-    return None if tot == 0 else (conc - disc) / tot
-
-
-def rank_persistence(steps) -> Dict[str, Any]:
-    """Does the same lineage keep winning?
-
-    Accumulation amplifies weak per-step signal by ~1/(1-alpha) ONLY if rank
-    order is stable. If it churns, accumulation averages it to nothing, and no
-    amount of per-step prompt work helps.
-    """
-    orders = []
-    for s in steps:
-        ranked = [p for p in s.particles if p.weight is not None]
-        if len(ranked) < 2:
-            continue
-        ranked.sort(key=lambda p: -p.weight)
-        orders.append([(p.lineage_id or p.particle_id) for p in ranked])
-    if len(orders) < 2:
-        return {}
-    taus = [t for t in (kendall_tau(a, b) for a, b in zip(orders, orders[1:])) if t is not None]
-    tops = [o[0] for o in orders]
-    repeats = sum(1 for a, b in zip(tops, tops[1:]) if a == b)
-    n_l = len({l for o in orders for l in o})
-    return {
-        "mean_kendall_tau": sum(taus) / len(taus) if taus else None,
-        "median_kendall_tau": _median(taus),
-        "top_repeat_rate": repeats / max(1, len(tops) - 1),
-        "top_repeat_chance": 1.0 / n_l if n_l else None,
-        "distinct_top_lineages": len(set(tops)),
-        "n_transitions": len(taus),
-    }
-
-
 def ancestral_mass(steps) -> Dict[str, List[Optional[float]]]:
     """Total posterior mass per ancestral root, per step.
 
@@ -555,44 +537,6 @@ def root_mass_ess_over_n(particles) -> Optional[float]:
     vals = [v / z for v in vals]
     denom = sum(v * v for v in vals)
     return (1.0 / denom) / n if denom > 0 else None
-
-
-def minted_root_survival(steps) -> Dict[str, Any]:
-    """Track what happens to roots 3e founds, after it founds them.
-
-    Branch A (source term works): minted roots hold or grow their mass.
-    Branch B (divergence rejected downstream): minted roots are downweighted
-    within a step or two and root-mass never recovers. B is a scorer finding.
-    """
-    minted = {}
-    for s in steps:
-        for r in (s.minted_roots or []):
-            minted[r] = {"born": s.step_idx, "mass": []}
-    if not minted:
-        return {"minted_count": 0}
-    for s in steps:
-        tot = {}
-        for p in s.particles:
-            k = p.root_id or p.lineage_id or p.particle_id
-            tot[k] = tot.get(k, 0.0) + (p.weight or 0.0)
-        for r, rec in minted.items():
-            if s.step_idx >= rec["born"]:
-                rec["mass"].append(tot.get(r, 0.0))
-    out, survived, faded = {}, 0, 0
-    for r, rec in minted.items():
-        m = rec["mass"]
-        if len(m) < 2:
-            continue
-        first, last = m[0], m[-1]
-        out[r] = {"born": rec["born"], "at_birth": round(first, 4),
-                  "final": round(last, 4), "ratio": round(last / first, 3) if first > 0 else None}
-        if first > 0 and last >= first * 0.5:
-            survived += 1
-        else:
-            faded += 1
-    return {"minted_count": len(minted), "tracked": len(out),
-            "survived": survived, "faded": faded,
-            "survival_rate": (survived / max(1, survived + faded)), "detail": out}
 
 
 def split_candidates(particles, weight_quantile: float = 0.25, rank_margin: int = 0):

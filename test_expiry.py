@@ -2,7 +2,7 @@
 import numpy as np
 from types import SimpleNamespace
 from tracer import Tracer
-from hypothesis import HypothesisV3, HypothesesSetV3
+from hypothesis import HypothesesSetV3
 
 
 def mk(n):
@@ -97,8 +97,6 @@ def test_counter_dropped_for_vanished_lineages():
     assert len(t._weak_run) == 2, t._weak_run
 
 
-
-
 # --- rebirth at fair share -------------------------------------------------
 
 def _rebirth(weights, accepted):
@@ -142,7 +140,7 @@ def test_rebirth_is_a_noop_when_nothing_was_accepted():
 
 def cache_tr(**kw):
     t = Tracer.__new__(Tracer)
-    flags = dict(retired_cap=40, rebirth_at_fair_share=False, revival_rebirth=False)
+    flags = dict(retired_cap=40, rebirth_at_fair_share=False)
     flags.update(kw)
     t.args = SimpleNamespace(**flags)
     t._retired = {}
@@ -205,25 +203,13 @@ def _finish(weights, accepted, revived_idx=(), **flags):
     return before, [float(x) for x in s.weights], res, s
 
 
-def test_revival_rebirth_lifts_revivals_and_leaves_plain_mints_alone():
-    # index 0 was revived, index 1 was minted; only 0 should move
-    before, after, res, _ = _finish([0.02, 0.02, 0.30, 0.66], accepted=[0, 1],
-                                    revived_idx=[0], revival_rebirth=True)
-    assert res['reborn'] == [0], res
-    assert after[0] > 5 * before[0], after
-    # the mint keeps its inherited floor weight, only rescaled by the same
-    # factor as every other survivor
-    assert abs((after[1] / after[2]) - (before[1] / before[2])) < 1e-9
-    assert abs(sum(after) - 1.0) < 1e-9
-
-
-def test_the_two_rebirth_flags_are_independent():
+def test_rebirth_covers_every_accepted_mint_or_none():
     _, _, res, _ = _finish([0.02, 0.02, 0.96], accepted=[0, 1], revived_idx=[0],
                            rebirth_at_fair_share=True)
-    assert res['reborn'] == [0, 1], "mint rebirth must cover every accepted mint"
+    assert res['reborn'] == [0, 1], "rebirth must cover every accepted mint"
     _, after, res, _ = _finish([0.02, 0.02, 0.96], accepted=[0, 1], revived_idx=[0])
     assert 'reborn' not in res and 'mass_moved_by_rebirth' not in res
-    assert abs(after[0] - 0.02) < 1e-9, "neither flag set: nothing moves"
+    assert abs(after[0] - 0.02) < 1e-9, "flag unset: nothing moves"
 
 
 def test_the_revival_return_resyncs_the_stored_text_list():
@@ -238,7 +224,6 @@ def test_the_revival_return_resyncs_the_stored_text_list():
     assert s.texts[0] == 'revived-0', s.texts
     assert s.texts == [h.text for h in s.hypotheses]
     assert s.anchors == [h.anchor for h in s.hypotheses]
-
 
 if __name__ == "__main__":
     for nm, fn in sorted(globals().items()):

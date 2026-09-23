@@ -129,23 +129,11 @@ class HypothesisV3():
     def update_accumulator(self, value: float):
         self.raw_accumulator = value
 
-    def update_context_history(self, new_context_history):
-        self.context_history = new_context_history
-
-    def update_context(self, new_context):
-        self.context = new_context
-
     def update_text(self, new_text):
         self.text = new_text
 
     def update_weight(self, new_weight):
         self.weight = new_weight
-
-    def add_update_details(self, details):
-        self.details = details
-
-    def update_perceptions(self, new_perceptions):
-        self.perceptions = new_perceptions
 
     def __repr__(self) -> str:
         return f"Text: {self.text} Weight: {self.weight}"
@@ -208,9 +196,6 @@ class HypothesesSetV3():
                     canon[key] = h.root_id
         self.anchors = [h.anchor for h in self.hypotheses]
 
-    def update_ess(self, ess):
-        self.previous_ess = ess
-
     @property
     def particle_ids(self):
         return [h.particle_id for h in self.hypotheses]
@@ -227,19 +212,6 @@ class HypothesesSetV3():
     def methods(self):
         return [getattr(h, 'method', None) for h in self.hypotheses]
 
-    def update_methods(self, new_methods):
-        """Assign generating methods positionally. Seeding only.
-
-        Set-level assignment is safe at founding because seeding is the one
-        place where the population is built in one go and every particle was
-        genuinely generated. Everywhere else a method arrives with a single
-        commitment, through update_anchor -- which is the choke point that
-        keeps the label in step with the anchor==root invariant.
-        """
-        for hypothesis, method in zip(self.hypotheses, new_methods):
-            if method is not None:
-                hypothesis.method = method
-
     def update_anchors(self, new_anchors, revision: bool = False, founds_root: bool = True):
         self.anchors = list(new_anchors)
         for hypothesis, anchor in zip(self.hypotheses, new_anchors):
@@ -253,30 +225,10 @@ class HypothesesSetV3():
     def accumulators(self):
         return [h.raw_accumulator for h in self.hypotheses]
 
-    def update_context_history(self, new_context_history):
-        self.context_history = new_context_history
-        for hypothesis in self.hypotheses:
-            hypothesis.update_context_history(new_context_history)
-
-    def update_context(self, new_context):
-        self.context = new_context
-        for hypothesis in self.hypotheses:
-            hypothesis.context = new_context
-
-    def update_texts(self, new_texts):
-        self.texts = new_texts
-        for hypothesis, text in zip(self.hypotheses, new_texts):
-            hypothesis.update_text(text)
-
     def update_weights(self, new_weights):
         self.weights = new_weights
         for hypothesis, weight in zip(self.hypotheses, new_weights):
             hypothesis.update_weight(weight)
-
-    def update_perceptions(self, new_perceptions):
-        self.perceptions = new_perceptions
-        for hypothesis in self.hypotheses:
-            hypothesis.update_perceptions(new_perceptions)
 
     def dump(self):
         """
@@ -409,51 +361,6 @@ def compute_ess(hypotheses: HypothesesSetV3) -> float:
     ess = 1 / np.sum(np.square(hypotheses.weights))
     return ess
 
-def backtrack(hypothesis: HypothesisV3) -> dict:
-    """Walk a particle's lineage to the root.
-
-    The previous version read `hypothesis.context` (the constructor sets
-    `contexts`) and `hypothesis.perceptions['summary']` (a list, with no such
-    key), so it raised AttributeError then TypeError. It was never called.
-
-    It also multiplied the weights along the chain and called that a
-    likelihood, which is meaningless after any resample: resampling resets
-    weights to 1/N, so the product was just N**-depth. The chain now carries
-    the unnormalized accumulator instead, which is the particle's own evidence.
-    """
-    trace = {
-        'particle_ids': [], 'parent_ids': [], 'texts': [], 'anchors': [],
-        'methods': [], 'weights': [], 'accumulators': [], 'operators': [],
-    }
-    seen = set()
-    while hypothesis is not None:
-        if hypothesis.particle_id in seen:
-            break  # defensive: never loop on a malformed chain
-        seen.add(hypothesis.particle_id)
-        trace['particle_ids'].append(hypothesis.particle_id)
-        trace['parent_ids'].append(hypothesis.parent_id)
-        trace['texts'].append(hypothesis.text)
-        trace['anchors'].append(hypothesis.anchor)
-        trace['methods'].append(getattr(hypothesis, 'method', None))
-        trace['weights'].append(hypothesis.weight)
-        trace['accumulators'].append(hypothesis.raw_accumulator)
-        trace['operators'].append(list(getattr(hypothesis, 'operators', [])))
-        hypothesis = hypothesis.parent
-
-    for key in list(trace):
-        trace[key].reverse()
-
-    trace['depth'] = len(trace['particle_ids'])
-    # Evidence along the lineage, in log space. Not a product of normalized
-    # weights -- see the docstring.
-    accs = [a for a in trace['accumulators'] if a is not None]
-    trace['final_accumulator'] = accs[-1] if accs else None
-    trace['anchor_changes'] = sum(
-        1 for a, b in zip(trace['anchors'], trace['anchors'][1:]) if a != b
-    )
-    return trace
-
-
 def extract_question(text: str) -> str:
     """
     Extract the question from the text.
@@ -470,20 +377,3 @@ def extract_question(text: str) -> str:
     else:
         return "none"
 
-def extract_info_of_question(text: str) -> str:
-    """
-    Extract the extra info for question in fantom
-    """
-    # Extract the question from the text. Extract the line that starts with "Question:" using regex.
-    if "Target:" in text:
-        match = re.search(r'Target:(.*)', text)
-    elif "Information:" in text:
-        match = re.search(r'Information:(.*)', text)
-    else:
-        return ""
-
-    if match:
-        info = match.group(1).strip()
-        return info
-    else:
-        return ""

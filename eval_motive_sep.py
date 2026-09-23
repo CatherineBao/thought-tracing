@@ -35,7 +35,6 @@ import json
 import random
 import re
 import subprocess
-import sys
 
 # What would SETTLE it -- written against the register the STANDARD field
 # produces (sentences about evidence), NOT against transcript vocabulary. That

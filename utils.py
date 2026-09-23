@@ -49,79 +49,6 @@ def load_prompt(path: str):
         prompt_template = file.read()
     return prompt_template
 
-def check_list_formatting(text: str) -> str:
-    """
-    Check whether a given text is in an ordered list or an unordered list format.
-
-    Args:
-        text (_type_): _description_
-
-    Returns:
-        str: _description_
-    """
-    lines = text.strip().split('\n')
-    # TODO: Update this to catch if there's any numbered list in the text, or if there's any unordered list in the text.
-    for line in lines:
-        if re.match(r'^\d+\.\s', line):
-            return "ordered"
-        elif re.match(r'^[\*\-]\s', line):
-            return "unordered"
-        else:
-            return "not_list"
-
-def parse_kv_ordered_list(text: str) -> dict:
-    """
-    Args:
-        text (_type_): 1. key: value\n2. key: value\n3. key: value\n
-
-    Returns:
-        dict: {1: {key: value}, 2: {key: value}, 3: {key: value}}
-    """
-    result_dict = {}
-    lines = text.strip().split('\n')
-    for line in lines:
-        line = line.replace("*", "") # Remove all asterisks, if any. Models tend to output markdown bold text with asterisks.
-        match = re.match(r'^(\d+)\.\s(.+)$', line.strip())
-        if match:
-            level = int(match.group(1))
-            key_and_value = match.group(2)
-            key, value = key_and_value.split(":")
-            result_dict[level] = {key.strip(): value.strip()}
-    return result_dict
-
-def parse_unordered_list(text: str) -> list:
-    """
-    Args:
-        text (_type_): * value\n* value\n* value\n or - value\n- value\n- value\n
-
-    Returns:
-        list: [value1, value2, value3]
-    """
-    result_list = []
-    lines = text.strip().split('\n')
-    for line in lines:
-        match = re.match(r'^[\*\-]\s(.+)$', line.strip())
-        if match:
-            result_list.append(match.group(1))
-    return result_list
-
-def parse_ordered_list(text: str) -> list:
-    """
-    Args:
-        text (_type_): 1. value\n2. value\n3. value\n
-
-    Returns:
-        list: [value1, value2, value3]
-    """
-    result_list = []
-    lines = text.strip().split('\n')
-    for line in lines:
-        line = line.replace("*", "") # Remove all asterisks, if any. Models tend to output markdown bold text with asterisks.
-        match = re.match(r'^\d+\.\s(.+)$', line.strip())
-        if match:
-            result_list.append(match.group(1))
-    return result_list
-
 def capture_and_parse_ordered_list(text: str):
     # Regular expression to match ordered list items (numbers followed by a period and a space)
     ordered_list_pattern = re.compile(r'(\d+\.\s+.+?)(?=\d+\.\s|$)', re.DOTALL)
@@ -133,27 +60,6 @@ def capture_and_parse_ordered_list(text: str):
     ordered_list = [re.sub(r'^\d+\.\s+', '', match).strip() for match in matches]
     
     return ordered_list
-
-def capture_and_parse_unordered_list(text: str):
-    # Regular expression to match unordered list items (bullet point followed by a space)
-    unordered_list_pattern = re.compile(r'([\*\-]\s+.+?)(?=[\*\-]\s|$)', re.DOTALL)
-    
-    # Find all matches
-    matches = unordered_list_pattern.findall(text)
-    
-    # Remove bullet points from the beginning of each match
-    unordered_list = [re.sub(r'^[\*\-]\s+', '', match).strip() for match in matches]
-    
-    return unordered_list
-
-def parse_markdown_list(text: str) -> list:
-    list_format = check_list_formatting(text)
-    if list_format == "ordered":
-        return parse_ordered_list(text)
-    elif list_format == "unordered":
-        return parse_unordered_list(text)
-    else:
-        return None
 
 def prompting_for_ordered_list(model: BaseAgent, prompt: str, n: int, history: List = None, system_prompt: str = None) -> List[str]:
     tolerance = 3
@@ -168,42 +74,6 @@ def prompting_for_ordered_list(model: BaseAgent, prompt: str, n: int, history: L
             temperature += 0.33
             tolerance -= 1
     return parsed_list
-
-def parse_yes_partially_no(text: str) -> str:
-    if text.lower().startswith("yes"):
-        return "yes"
-    elif text.lower().startswith("partially"):
-        return "partially"
-    else:
-        return "no"
-
-def extract_json_from_string(input_string):
-    """
-    Extracts and parses JSON data from a string that contains plain text as well as JSON.
-
-    Args:
-        input_string (str): The string containing both plain text and JSON.
-
-    Returns:
-        dict: Parsed JSON data as a Python dictionary, or None if no valid JSON is found.
-    """
-    # Use regular expression to find JSON object in the string
-    json_pattern = r'\{.*\}'  # Pattern for JSON-like structure (basic version)
-    
-    # Search for JSON pattern
-    match = re.search(json_pattern, input_string, re.DOTALL)  # re.DOTALL allows '.' to match newlines
-    
-    if match:
-        json_str = match.group(0)
-        try:
-            # Parse JSON string into a Python dictionary
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            print("Error: Invalid JSON format.")
-            return None
-    else:
-        print("No JSON object found in the string.")
-        return None
 
 def list_to_unordered_list_string(items, list_bullet="-"):
     """
@@ -222,10 +92,6 @@ def list_to_unordered_list_string(items, list_bullet="-"):
 
 def softmax(x):
     return(np.exp(x)/np.exp(x).sum())
-
-def map_int_to_string(self, int_number):
-    mapping = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty"}
-    return mapping[int_number]
 
 def jaccard_similarity(sent1, sent2):
     lancaster = LancasterStemmer()
@@ -249,20 +115,6 @@ def overall_jaccard_similarity(sentences):
     
     # If pair_count is 0 (e.g., when n=1), avoid division by zero by returning 1 (self-similarity)
     return total_similarity / pair_count if pair_count > 0 else 1.0
-
-def uncapitalize(s):
-    return s[:1].lower() + s[1:]
-
-def find_first_integer(s):
-    # Use a regular expression to search for integers in the string
-    match = re.search(r'\d+', s)
-    
-    # If a match is found, return it as an integer
-    if match:
-        return int(match.group())
-    
-    # If no match is found, return None or an appropriate message
-    return 50
 
 class NpEncoder(json.JSONEncoder):
     def default(self, obj):

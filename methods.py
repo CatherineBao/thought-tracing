@@ -48,11 +48,6 @@ method can generate.
 from dataclasses import dataclass
 
 
-# The three generation sites a method can speak at. A fragment is APPENDED to
-# the site's existing prompt, never replaces it -- see standard_block() in
-# tracer.py for why replacement would make the measurement circular.
-SITES = ('seed', 'perturb', 'split', 'standard')
-
 # Which field a method acts on.
 #   anchor   -- it proposes a COMMITMENT, and its fragment lands in the
 #               commitment block at the seed/perturb/split sites.
@@ -364,6 +359,10 @@ SEED_OUTPUT_GUARD = (
 def method_rule(key, site, target):
     """The fragment `key` contributes at `site`, or "" for the default path.
 
+    A fragment is APPENDED to the site's existing prompt and never replaces it
+    -- see standard_block() in tracer.py for why replacement would make the
+    measurement circular.
+
     Mirrors standard_rule() in tracer.py deliberately: same tolerant default,
     so an unrecognised key degrades to today's prompt rather than raising deep
     inside a run. run_musing.py validates the key at PARSE time, which is where
@@ -409,11 +408,6 @@ def contributing_methods(method_list, site):
     """
     keys = [k for k in (method_list or []) if method_rule(k, site, 'x')]
     return keys or [None]
-
-
-def seeding_methods(method_list):
-    """Back-compat alias; seeding is just the seed site."""
-    return contributing_methods(method_list, 'seed')
 
 
 def family_of(key):

@@ -8,7 +8,6 @@ from typing import List
 from .base import AsyncBaseAgent
 
 import google.generativeai as genai
-from google.generativeai.types import safety_types
 
 safety_settings = [
     {

@@ -33,7 +33,6 @@ run_musing's --confidence-gate.
   python validate_profiles.py --runs cov4s{seed}_{person} --seeds 0,1,2
 """
 import argparse
-import collections
 
 import eval_motive_sep as e
 import profiles as P

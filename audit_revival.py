@@ -1,30 +1,27 @@
-"""Does --revival-rebirth earn its mass move? The exp_4 metrics, per arm.
+"""Revival and mint health, per run and pooled across arms.
 
-    python audit_revival.py rrctrl_s0 rrarm_s0 rrctrl_s1 rrarm_s1
+    python audit_revival.py v6_bb_Rodriguez rrctrl_s0
+    python audit_revival.py --arm ctrl=rrctrl_s0,rrctrl_s1 --arm x=run_a,run_b
 
-exp_4 tested the fair-share reset on EVERY accepted mint and lost: birth mass
-rose 0.047 -> 0.113 as intended, but the mass came from the established
-hypotheses, so root-mass ESS fell, the collapse trigger fired 9 -> 13 times with
-3 -> 6 consecutive re-fires, mint survival fell 59% -> 32% and argmax churn
-8 -> 5. --revival-rebirth is the same reset restricted to REVIVED particles, so
-it has to be judged on the same columns -- a birth-mass rise that buys another
-root-mass collapse is the exp_4 result again at lower volume.
+The per-run table is for reading one run. The --arm mode is for comparing two,
+and it exists because the table is NOT safe to compare with: it reports a per-run
+median, and mint birth mass spans 0.12 to 2.18 of fair share WITHIN a single run
+on 4-12 mints. Reading a two-seed ordering of those medians as an effect is how
+three interventions in a row were each briefly believed to work. Pooling the
+underlying events and permuting the labels uses the same runs and the same API
+spend and gives an honest p.
 
   revive      revivals, and how many were a SECOND return of the same anchor.
-              A rising oscillation count is the failure the null gate exists to
-              prevent, and it is the specific risk of making revival cheaper.
-  birth       median post-step weight of a revived particle, AS A FRACTION OF
-              FAIR SHARE. The raw weight is not comparable across arms: this
-              population decays from 8 to 4-5 over a run, so 1/n moves by a
-              factor of two within a single trace and two arms can post the same
-              raw median while one is at fair share and the other is well under
-              it. 1.00 means born at parity, which is what the flag forces.
-  mint-birth  the same for non-revived mints, which the flag does NOT touch.
-              It is the within-run control: if it moves too, the difference is
-              the sampler, not the arm.
-  rm-ess      median root-mass ESS over N. exp_4's actual failure.
-  re-fire     longest run of consecutive steps that fired perturbation. exp_4
-              went 3 -> 6; chasing a collapse the operator itself caused.
+              Across the four runs that first logged it, 8 of 25 revivals were
+              repeat returns -- the retire/revive oscillation the null gate in
+              revive_retired is documented as preventing.
+  birth       median post-step weight of a revived particle as a FRACTION OF
+              FAIR SHARE. Never the raw weight: the population decays from 8 to
+              4-6 over a run, so 1/n moves by a factor of two and two arms can
+              post the same raw median at opposite ends of parity.
+  mint-birth  the same for non-revived mints. Within-run control.
+  rm-ess      median root-mass ESS over N.
+  re-fire     longest run of consecutive steps that fired perturbation.
   survive     of the roots minted or revived at step t, the share still alive
               five steps later.
 """
@@ -119,9 +116,20 @@ def measure(recs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("runs", nargs="+")
+    ap.add_argument("runs", nargs="*")
     ap.add_argument("--out-dir", default=ml.OUT_DIR)
+    ap.add_argument("--arm", action="append", default=None,
+                    help="name=run1,run2 -- pool events across the arm's runs and "
+                         "compare against the FIRST --arm given. Repeatable.")
     a = ap.parse_args()
+    if a.arm:
+        arms = {}
+        for spec in a.arm:
+            name, _, rids = spec.partition("=")
+            arms[name] = [x for x in rids.split(",") if x]
+        pooled(arms, a.out_dir)
+        if not a.runs:
+            return
 
     hdr = (f"{'run':<14}{'steps':>6}{'surp':>6}{'reviv':>6}{'osc':>5}"
            f"{'birth/fair':>12}{'mint/fair':>12}{'rm-ess':>8}{'re-fire':>9}"
@@ -138,6 +146,91 @@ def main():
               f"({m['n_rev']:>2}){m['birth_mint']:>9.2f}({m['n_mint']:>2})"
               f"{m['rm_ess']:>8.3f}{m['refire']:>9}{m['survive']:>9.2f}"
               f"{m['churn']:>7}")
+
+
+
+# --------------------------------------------------------------------------
+# Pooled, event-level arm comparison.
+#
+# The table above reports a per-run MEDIAN and leaves two numbers an arm to be
+# read by eye. That threw away most of the data and led to reading a two-seed
+# ordering as a mechanism: mint birth mass spans 0.12 to 2.18 of fair share
+# WITHIN one run on 4-12 mints, so its per-run median is not a level. Pooling
+# the underlying events and comparing distributions uses the same runs and the
+# same API spend, and says how much of the apparent difference survives.
+#
+# Unpaired permutation, not a t-test: these are bounded, skewed, small samples.
+# It is also NOT a paired test and cannot be -- two arms diverge after the first
+# step they disagree on, so there is no step-to-step correspondence to pair. For
+# anything whose effect is immediate rather than downstream, audit_slots.py
+# pairs it properly against the same populations and is the stronger instrument.
+# --------------------------------------------------------------------------
+
+def events(recs):
+    """Per-event samples, not per-run summaries."""
+    mint_birth, survival = [], []
+    n = len(recs)
+    for i, r in enumerate(recs):
+        parts = r.get("particles") or []
+        if not parts:
+            continue
+        fair = 1.0 / len(parts)
+        rev = {v["index"] for v in (r.get("revived") or []) if v.get("index") is not None}
+        minted = set(r.get("minted_roots") or [])
+        for j, p in enumerate(parts):
+            if j not in rev and p.get("root_id") in minted and p.get("perturb_accepted"):
+                mint_birth.append(float(p.get("weight") or 0.0) / fair)
+        if i + 5 < n:
+            new = {parts[j].get("root_id") for j in rev} | minted
+            for root in new:
+                if root:
+                    survival.append(1.0 if alive_at(recs, i + 5, root) else 0.0)
+    return {"mint_birth": mint_birth, "survival": survival}
+
+
+def perm_diff(a, b, trials=20000, seed=0):
+    """Two-sided p for a difference in means, by label shuffling."""
+    import numpy as _np
+    a, b = _np.array(a, dtype=float), _np.array(b, dtype=float)
+    if len(a) < 3 or len(b) < 3:
+        return float("nan")
+    obs = abs(a.mean() - b.mean())
+    both = _np.concatenate([a, b])
+    rng = _np.random.default_rng(seed)
+    hits = 0
+    for _ in range(trials):
+        rng.shuffle(both)
+        if abs(both[:len(a)].mean() - both[len(a):].mean()) >= obs:
+            hits += 1
+    return hits / trials
+
+
+def pooled(arms, out_dir):
+    """arms: {name: [run_id, ...]}. The first is the control."""
+    data = {}
+    for name, rids in arms.items():
+        acc = {"mint_birth": [], "survival": []}
+        for rid in rids:
+            recs = load(rid, out_dir)
+            if not recs:
+                print(f"!! {rid} not found")
+                continue
+            for k, v in events(recs).items():
+                acc[k].extend(v)
+        data[name] = acc
+
+    ctrl = list(arms)[0]
+    for metric in ("mint_birth", "survival"):
+        print(f"\n{metric}  (pooled events, control = {ctrl})")
+        print(f"  {'arm':<12}{'n':>5}{'mean':>9}{'median':>9}{'vs ctrl':>10}{'p':>8}")
+        for name in arms:
+            v = data[name][metric]
+            if not v:
+                continue
+            d = "-" if name == ctrl else f"{st.mean(v) - st.mean(data[ctrl][metric]):>+.3f}"
+            p = "-" if name == ctrl else f"{perm_diff(v, data[ctrl][metric]):.3f}"
+            print(f"  {name:<12}{len(v):>5}{st.mean(v):>9.3f}{st.median(v):>9.3f}"
+                  f"{d:>10}{p:>8}")
 
 
 if __name__ == "__main__":

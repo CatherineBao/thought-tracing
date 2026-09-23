@@ -34,7 +34,6 @@ import collections
 import datetime as dt
 import glob
 import json
-import math
 import os
 import statistics as st
 import subprocess
@@ -307,7 +306,6 @@ def vacuity_screen(limit=None):
     """
     try:
         import audit_vacuity as av
-        from replay_likelihood import find_traces  # noqa: F401
     except Exception as exc:
         return {"error": f"screen unavailable: {exc}"}
 

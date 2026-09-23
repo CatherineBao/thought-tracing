@@ -3,7 +3,7 @@
 Non-linear progression, as defined: strengthen, weaken, merge, split, revise.
 Shows the commitments themselves, not just the metrics.
 """
-import argparse, glob, sys
+import argparse, sys
 import musing_layout as ml
 import trace_log as t
 

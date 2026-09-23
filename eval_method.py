@@ -31,8 +31,6 @@ declared one is understood; one that fails a different way is the finding.
 
 import argparse
 import collections
-import glob
-import json
 import subprocess
 
 from methods import METHODS

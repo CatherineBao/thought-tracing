@@ -28,9 +28,9 @@ from utils import (
 from hypothesis import compute_ess, extract_question, resample_hypotheses_with_other_info, HypothesesSetV3
 import musing_layout
 import trace_log
-from trace_log import StepRecord, ParticleRecord, RunLogger
+from trace_log import StepRecord, ParticleRecord
 from methods import METHODS, method_rule, contributing_methods
-from profiles import render_profile
+from profiles import render_profile, settles_rule, confidence_of as profile_confidence
 
 
 _ANSWER_PATTERNS = [
@@ -281,8 +281,12 @@ def standard_rule(target, variant=None):
     return STANDARD_PROMPTS.get(v, STANDARD_PROMPTS["v1"]).format(t=target)
 
 
-def standard_block(target, variant=None, method=None):
+def standard_block(target, variant=None, method=None, settles=""):
     """The STANDARD instructions: the chosen variant, plus any method fragment.
+
+    `settles` is the profile's settlement clause (profiles.settles_rule), the
+    one persistent per-PERSON input this field has ever had. It is appended
+    under the same rule as a method fragment and for the same reason.
 
     APPEND, NEVER REPLACE. eval_motive_sep's MODES lexicon was fitted against
     the register v1-v4 produce, and its own note records that differential
@@ -294,7 +298,9 @@ def standard_block(target, variant=None, method=None):
 
     Only standard-axis methods contribute here; method_rule enforces that.
     """
-    return standard_rule(target, variant) + method_rule(method, 'standard', target)
+    return (standard_rule(target, variant)
+            + method_rule(method, 'standard', target)
+            + (settles or ""))
 
 
 def sole_standard_method(method_list):
@@ -399,6 +405,44 @@ def accumulate_weights(lineage_ids, likelihood, accum, alpha=0.85, beta=1.0, eps
             'accum': {lid: x for lid, x in zip(lineage_ids, w_final)},
             'mass_moved_by_floor': mass_moved, 'epsilon': eps,
             'alpha': alpha, 'beta': beta}
+
+
+def rank_scorer_prompts(target_agent, n_sent, context_str, hypothesis_block, action):
+    """The rank-mode scorer's (system, user) prompt pair.
+
+    Module level rather than inline in prompt_likelihood_comparative because
+    audit_vacuity.py re-scores a LOGGED slate against a substituted action, and
+    a re-scoring that rebuilt this wording by hand would be measuring a prompt
+    the filter never used. Same reason accumulate_weights is importable: the
+    offline tool and production must not be able to drift apart.
+
+    The user prompt's three blocks are also the seam the audit cuts on -- it
+    parses <observed next action> out of a logged prompt and rebuilds the rest
+    verbatim -- so the block markers are load-bearing beyond formatting.
+    """
+    system_prompt = (
+        f"You compare competing hypotheses about {target_agent}'s mind against an action "
+        f"{target_agent} actually took.\n\n"
+        f"First rank all {n_sent} hypotheses from BEST to WORST predictor of that action. "
+        f"Commit to a strict order -- no ties. Then score each 0-100 for how strongly it "
+        f"predicts the action.\n\n"
+        f"Rules:\n"
+        f"- Judge only prediction of THIS action. Do not reward a hypothesis for being "
+        f"detailed, well written, or generally plausible.\n"
+        f"- A hypothesis that would equally well predict many other actions is a weak "
+        f"predictor of this one.\n"
+        f"- If the hypotheses genuinely are equivalent, say so in REASONING and score "
+        f"them alike; do not invent a difference that is not there.\n\n"
+        f"Answer in exactly this format, ranking FIRST:\n"
+        f"RANKING\n1st: <hypothesis number>\n...\n{n_sent}th: <hypothesis number>\n\n"
+        f"ALLOCATION\n1: <0-100>\n...\n{n_sent}: <0-100>\n\nREASONING\n"
+        f"<what distinguishes the best from the worst>")
+    prompt = (
+        f"<previous context>\n{context_str}\n</previous context>\n\n"
+        f"<candidate hypotheses about {target_agent}'s thoughts>\n{hypothesis_block}\n"
+        f"</candidate hypotheses about {target_agent}'s thoughts>\n\n"
+        f"<observed next action>\n{action}\n</observed next action>")
+    return system_prompt, prompt
 
 
 def parse_ranking(text: str, n: int):
@@ -532,7 +576,6 @@ def get_tracer_parser():
     parser.add_argument('--use-tracing', action='store_true', help='whether to run the model with thought tracing')
     parser.add_argument('--tracing-model', type=str, help='Model to use to answer final question.')
     parser.add_argument('--n-hypotheses', type=int, default=4, help='number of hypotheses to generate for each input', )
-    parser.add_argument('--target-perceptions', type=str, default='sight',help='target perceptions to test')  #'sight,hearing,overall', 
     parser.add_argument('--use-helper-llm', action='store_true', help='whether to use user helper llm for identifying target agent and labeling actions',)
     parser.add_argument('--existing-traces', default=None, help='path to existing traces')
     parser.add_argument('--input-is-chat', action='store_true', help="whether the input is a chat or not")
@@ -784,6 +827,10 @@ class BaseTracer(ABC):
             rec.baseline_score = weight_results.get('baseline_score')
             rec.baseline_rank = weight_results.get('baseline_rank')
             rec.best_margin = weight_results.get('best_margin')
+            marg = weight_results.get('margins')
+            rec.margins = [float(x) for x in marg] if marg is not None else None
+            bm = weight_results.get('best_margin')
+            rec.lean_undefined = (float(bm) <= 0.0) if bm is not None else None
             rec.ranking = weight_results.get('ranking')
             rec.alloc_keying = weight_results.get('alloc_keying')
             rec.rank_alloc_agreement = weight_results.get('rank_alloc_agreement')
@@ -1200,9 +1247,6 @@ class BaseTracer(ABC):
     def batch_interact(self, texts: list, temperature: float=0, max_tokens: int=256):
         return self.base_model.batch_interact(texts, temperature=temperature, max_tokens=max_tokens)
 
-    def batch_cot(self, texts: list, temperature: float=0, max_tokens: int=256):
-        return self.base_model.batch_cot(texts, temperature=temperature, max_tokens=max_tokens)
-
 class Tracer(BaseTracer):
     # Tracer's weighted average is a model-written paragraph; TracerLight's is a
     # concatenated "**Prediction n**" block that reads better opened on its own
@@ -1231,15 +1275,26 @@ class Tracer(BaseTracer):
         # nothing at trace time and, unlike the prior, is not confined to what
         # this one context happens to reveal.
         self._character_profile = None
+        # PERSISTS, unlike _character_profile's seeding-only injection: a
+        # settlement disposition is the most stable thing about a person, so it
+        # speaks at every site that derives a standard, on every step.
+        self._profile_settles = ""
         if getattr(self.args, 'character_profile', False):
             # Normally the traced agent's own record. Under --profile-as it is
             # somebody else's, and the traced agent is scrubbed from the roster
             # so the record does not refer to the person it is describing.
             token = getattr(self.args, 'profile_as', None) or self.target_agent
+            gate = getattr(self.args, 'confidence_gate', None)
             self._character_profile = render_profile(
                 getattr(self.args, 'profiles', None), token,
                 getattr(self.args, 'profile_roster', None) or (),
-                exclude={self.target_agent}) or None
+                exclude={self.target_agent}, gate=gate) or None
+            # Same token as the anchor block, so a scrambled run is scrambled
+            # on BOTH axes -- handing over someone else's aims but their own
+            # settling conditions would be a third condition nobody asked for.
+            self._profile_settles = settles_rule(
+                getattr(self.args, 'profiles', None), token, self.target_agent,
+                mode=getattr(self.args, 'settles_mode', 'assert'), gate=gate)
             if self._character_profile:
                 tag = (f"{token} AS {self.target_agent} [SCRAMBLED]"
                        if token != self.target_agent else self.target_agent)
@@ -1249,8 +1304,16 @@ class Tracer(BaseTracer):
             else:
                 # Loud, because a silent miss turns a profile arm into a second
                 # copy of the baseline arm and the sweep still looks healthy.
-                print(f"[yellow]--character-profile set but no profile for "
-                      f"{self.target_agent}; running with no prior.[/yellow]")
+                # A GATED profile is a deliberate suppression, not a miss, and
+                # must say so or the two are indistinguishable in the log.
+                conf = profile_confidence(getattr(self.args, 'profiles', None), token)
+                if gate is not None and conf is not None and conf < gate:
+                    print(f"[yellow]profile for {token} GATED OFF "
+                          f"(confidence {conf:.2f} < {gate:.2f}); tracing with no prior."
+                          f"[/yellow]")
+                else:
+                    print(f"[yellow]--character-profile set but no profile for "
+                          f"{self.target_agent}; running with no prior.[/yellow]")
 
     def infer_role_prior(self):
         """One call: what seat is this person sitting in, and what does that seat want?
@@ -1529,8 +1592,90 @@ class Tracer(BaseTracer):
         # it returns a bare list; attach them to the founding particles here.
         for h, sd in zip(initial_hypotheses.hypotheses, getattr(self, '_last_standards', []) or []):
             h.update_standard(sd)
+        self._restore_memory(initial_hypotheses)
 
         return initial_hypotheses
+
+    def _restore_memory(self, hypotheses):
+        """Seed part of the founding population from the durable store.
+
+        WHAT TRANSFERS AND WHAT DOES NOT. The anchor and its standard are
+        STANDING -- they are what this person is pursuing and what would
+        settle it, and neither is a claim about this particular transcript.
+        The belief TEXT is not: it is "what they now believe that bears on
+        that aim", which is about a context this run has not seen. So only the
+        commitment is restored, and the seeded belief text is left in place for
+        propagation to reconcile. The anchor-holding block already does exactly
+        that work -- "HOLD THIS COMMITMENT FIXED ... your AIM must restate this
+        commitment" -- so step 1 pulls the text onto the restored anchor
+        without a new prompt site.
+
+        THE ROOT IS RESTORED, NOT MINTED. update_anchor mints a fresh root on
+        any anchor change, which is right within a run and wrong here: a
+        commitment the filter held in March and holds again in June is one
+        hypothesis with a gap, not two that agree. This is the same reasoning
+        revive_retired uses to return a commitment under its original root,
+        extended across the run boundary.
+
+        WEIGHTS DO NOT TRANSFER. The founding population is uniform, so a
+        restored particle enters at 1/n like every other -- the rule that a
+        stored weight may order candidates and never act as a prior is
+        satisfied here by construction rather than by care.
+
+        NEVER THE WHOLE POPULATION. Restoring every slot would make a run
+        unable to discover anything its predecessor did not already hold, so
+        at most half the slots are replaced and the rest stay freshly seeded.
+        """
+        if not getattr(self.args, 'memory', False):
+            return 0
+        try:
+            import memory as _mem
+        except ImportError:
+            return 0
+        corpus = getattr(self.args, 'corpus', None)
+        if not corpus:
+            return 0
+        try:
+            store = _mem.load(getattr(self.args, 'memory_dir', 'musing_out'),
+                              corpus, _mem.config_hash(self.args), self.target_agent)
+        except ValueError as e:
+            print(Panel(f"memory: refusing to load -- {e}", style="red", box=box.SIMPLE_HEAD))
+            return 0
+        rows = _mem.restorable(store)
+        if not rows:
+            return 0
+        hyps = hypotheses.hypotheses
+        cap = getattr(self.args, 'memory_restore_max', None)
+        if cap is None:
+            cap = max(1, len(hyps) // 2)
+        k = min(int(cap), len(rows), max(0, len(hyps) - 1))
+        if k <= 0:
+            return 0
+        held = {(h.anchor or '').strip() for h in hyps}
+        picked = [r for r in rows if r['anchor'] not in held][:k]
+        if not picked:
+            return 0
+        # Replace from the END so the ordering of freshly seeded particles --
+        # which is method-interleaved on purpose -- is disturbed as little as
+        # possible.
+        for h, rec in zip(reversed(hyps), picked):
+            h.update_anchor(rec['anchor'], founds_root=True,
+                            standard=rec.get('standard'), method=rec.get('method'))
+            if rec.get('root_id'):
+                h.root_id = rec['root_id']
+            h.note_operator('restore')
+        # Recorded on the tracer, not only on the particle. `operators` is
+        # per-particle and propagation builds fresh particles, so by the end of
+        # the run the holder of a restored anchor is a descendant that never
+        # saw the restore -- the marker read False on every record while the
+        # restore itself was working.
+        if not hasattr(self, '_restored_anchors'):
+            self._restored_anchors = set()
+        self._restored_anchors.update(r['anchor'] for r in picked)
+        hypotheses.anchors = [h.anchor for h in hyps]
+        print(Panel(f"memory: restored {len(picked)} of {len(hyps)} commitments",
+                    style="green", box=box.SIMPLE_HEAD))
+        return len(picked)
 
     def get_assumption(self, question: str):
         if self.args.dataset == 'mmtom':
@@ -1809,7 +1954,8 @@ class Tracer(BaseTracer):
             f"- NEVER a description of what {target} says or does. Name the END, not the move.\n"
             f"- At most {COMMITMENT_MAX_WORDS} words. Plain verb phrase, e.g. "
             f"\"Avenge her mother\", \"Earn Katara's trust\".\n\n"
-            + standard_block(target, getattr(self.args, 'standard_prompt', None), mth) +
+            + standard_block(target, getattr(self.args, 'standard_prompt', None), mth,
+                             settles=getattr(self, '_profile_settles', '')) +
             f"Children may share an aim and be genuinely exclusive because their "
             f"standards differ.\n\n"
             f"Answer exactly:\n" +
@@ -2397,58 +2543,19 @@ class Tracer(BaseTracer):
            that floor-born mints kept the trigger hot was wrong -- the fix fed
            the loop it was meant to break. Kept behind the flag as the evidence.
 
-           --revival-rebirth is the SEPARATE cell: the same reset, revived
-           particles only. exp_4 rebirthed every accepted mint, of which
-           revivals are a small minority, and its stated rationale does not
-           cover them: "a new claim that has not yet
-           been tested" is the opposite of a revived one, which was tested and
-           earned mass on evidence that has not been retracted. That is what the
-           cache stores `peak` FOR, and peak is currently read only for pool
-           ranking and eviction, never for reinstatement. The volume differs by
-           an order of magnitude too -- at most k = len(idxs)//2 particles on
-           surprise steps only -- so the mass transfer that sank exp_4 applies
-           at a fraction of the scale. Fair share, NOT peak: peak is a
-           high-water mark under a ~6.7x amplifier, and reinstating there would
-           let one ranking call restore a hypothesis to its best-ever standing.
-
-           MEASURED, AND STILL OFF BY DEFAULT -- because it buys nothing, not
-           because it costs anything. bb_Rodriguez, the 74-set span, 80 steps,
-           n=8, two seeds per arm (--seed fixes resampling but not the model, so
-           the arms carry sampler noise and two seeds bound it rather than
-           removing it):
-
-             birth/fair   0.61 0.77  ->  0.94 0.95   the flag does its job
-             root-mass    0.775 0.806 -> 0.759 0.837  arm STRADDLES control
-             mint/fair    0.68 0.81  ->  0.40 0.66   both arm seeds below both
-             survive      0.31 0.73  ->  0.53 0.78   straddles
-             churn        50 42      ->  35 44       straddles
-             re-fire      3 3        ->  3 5         straddles
-
-           The volume argument HELD: exp_4's actual failure -- root-mass ESS
-           falling and the collapse trigger re-firing on consecutive steps --
-           does not reproduce at ~1 particle per surprise step. So this is not
-           exp_4 again in miniature, which is what testing the cell separately
-           was for. But nothing improves either: survival and churn straddle the
-           control on both seeds. The only cost signal is mints being born
-           lighter, and while both arm seeds sit below both control seeds, that
-           ordering arises by chance one run in six at two seeds a side.
-
-           The premise was also weaker than it looked. Revived particles were
-           never born at the floor: measured 0.61-0.77 of fair share, not the
-           ~0.12 the exp_3 note describes, because the population decays 8 -> 4-5
-           over a run (which makes fair share large and the eps floor small) and
-           a surprise step flattens the likelihood to uniform. The flag corrects
-           a ~30% handicap, not an 8x one.
+           A revival-only variant of this reset was built and removed. It
+           worked mechanically -- revived particles entered at 0.94/0.95 of fair
+           share against 0.61/0.77 -- and exp_4's failure did NOT reproduce at
+           that volume, root-mass ESS straddling the control rather than
+           falling. It simply bought nothing: survival and churn straddled too.
+           Do not re-derive it; the cell is tested and empty.
 
         Deliberate, logged mass move -- NOT asserted on, same class as the
         floor. sync_accumulator() re-keys the prior from these weights, so the
         reset reaches the accumulator and is not undone on the next step.
         """
-        rb_all = bool(getattr(self.args, 'rebirth_at_fair_share', False))
-        rb_rev = bool(getattr(self.args, 'revival_rebirth', False))
-        reborn = set(results['accepted']) if rb_all else set()
-        if rb_rev:
-            reborn |= {r['index'] for r in results.get('revived') or []}
+        reborn = (set(results['accepted'])
+                  if getattr(self.args, 'rebirth_at_fair_share', False) else set())
         if reborn:
             before = [float(x) for x in hypotheses.weights]
             n = len(before)
@@ -2598,7 +2705,8 @@ class Tracer(BaseTracer):
             # because the real difference (a count is right when it matches
             # what we deliver / when two labellers reproduce it) is a
             # criterion, not a desire.
-            + standard_block(target_agent, getattr(self.args, 'standard_prompt', None), mth) +
+            + standard_block(target_agent, getattr(self.args, 'standard_prompt', None), mth,
+                             settles=getattr(self, '_profile_settles', '')) +
             f"\n"
             f"Answer exactly {k} numbered lines:\n" +
             "\n".join(f"{j+1}. COMMITMENT: <short clause> | BELIEF: <one or two sentences> "
@@ -2743,7 +2851,8 @@ class Tracer(BaseTracer):
             # and the sensor logs"), so the difference is the instruction, not
             # the model. Name the failure explicitly and demand an artefact.
             + standard_block(target_agent, getattr(self.args, 'standard_prompt', None),
-                             sole_standard_method(getattr(self.args, 'methods', None))) +
+                             sole_standard_method(getattr(self.args, 'methods', None)),
+                             settles=getattr(self, '_profile_settles', '')) +
             f"  Name who would produce it and what it would show. Two hypotheses may "
             f"share a goal and differ ONLY here.\n\n"
             f"Output exactly {n} lines:\n1. <clause> | STANDARD: <what would settle it>\n"
@@ -2865,28 +2974,8 @@ class Tracer(BaseTracer):
             # so a degenerate near-uniform allocation remains possible and the
             # gate can still detect it. probe_scorer.py is the guard that this
             # does not simply manufacture order on identical inputs.
-            system_prompt = (
-                f"You compare competing hypotheses about {target_agent}'s mind against an action "
-                f"{target_agent} actually took.\n\n"
-                f"First rank all {n_sent} hypotheses from BEST to WORST predictor of that action. "
-                f"Commit to a strict order -- no ties. Then score each 0-100 for how strongly it "
-                f"predicts the action.\n\n"
-                f"Rules:\n"
-                f"- Judge only prediction of THIS action. Do not reward a hypothesis for being "
-                f"detailed, well written, or generally plausible.\n"
-                f"- A hypothesis that would equally well predict many other actions is a weak "
-                f"predictor of this one.\n"
-                f"- If the hypotheses genuinely are equivalent, say so in REASONING and score "
-                f"them alike; do not invent a difference that is not there.\n\n"
-                f"Answer in exactly this format, ranking FIRST:\n"
-                f"RANKING\n1st: <hypothesis number>\n...\n{n_sent}th: <hypothesis number>\n\n"
-                f"ALLOCATION\n1: <0-100>\n...\n{n_sent}: <0-100>\n\nREASONING\n"
-                f"<what distinguishes the best from the worst>")
-            prompt = (
-                f"<previous context>\n{context_and_perception_str}\n</previous context>\n\n"
-                f"<candidate hypotheses about {target_agent}'s thoughts>\n{hypothesis_block}\n"
-                f"</candidate hypotheses about {target_agent}'s thoughts>\n\n"
-                f"<observed next action>\n{action}\n</observed next action>")
+            system_prompt, prompt = rank_scorer_prompts(
+                target_agent, n_sent, context_and_perception_str, hypothesis_block, action)
             raw = self.tracer_model.interact(prompt, system_prompt=system_prompt,
                                              temperature=0, max_tokens=2048, stage='likelihood')
             alloc, err = parse_allocation(raw, n_sent)
@@ -3466,6 +3555,23 @@ class Tracer(BaseTracer):
                                 # it may still be right about the standing goal even
                                 # when it fails to explain this one action, and the
                                 # point is to ADD a reading, not to destroy one.
+                                #
+                                # Selecting by MARGIN over the null instead was built,
+                                # measured and removed. The ordering is real (the worst
+                                # quartile persists to the next surprise step at 0.42
+                                # against a 0.20 floor) and taking a non-floor slot does
+                                # fund the mint better (+0.27 fair share, never worse,
+                                # p<0.001 over 438 paired steps). It changed nothing
+                                # downstream, because on 55% of surprise steps the weak
+                                # half is exactly TIED in weight and no selection rule
+                                # can act at all -- on those steps a median 43% of the
+                                # population carries one identical weight. This branch
+                                # helps cause that: it sets the likelihood to [1.0]*n,
+                                # and the accumulator is a monotone map of the prior, so
+                                # a surprise step cannot separate anything that arrived
+                                # equal. See audit_ties.py. Separating that block is the
+                                # prerequisite; until then any rule here moves ~0.3 fair
+                                # share about six times a run.
                                 nrep = max(1, len(new_hypotheses.hypotheses) // 4)
                                 idxs = sorted(range(len(new_hypotheses.hypotheses)),
                                               key=lambda j: float(new_hypotheses.weights[j]))[:nrep]
@@ -3565,11 +3671,164 @@ class Tracer(BaseTracer):
             if state_action['action']:
                 context_history.append({'text': state_action['action'], 'action': True})
 
+            every = int(getattr(self.args, 'memory_checkpoint_steps', 10) or 0)
+            if every and idx and idx % every == 0:
+                self._checkpoint_memory()
+
         traced_thoughts = self.chain_weighted_average_trace(hypotheses_list)
         trace_text = f"{self.trace_header}\n\n{traced_thoughts['text']}"
 
         self.dump(traced_thoughts, hypotheses_list)
+        self._persist_memory(hypotheses_list)
         return trace_text
+
+    def _checkpoint_memory(self):
+        """Mid-run write of RETIREMENTS ONLY. Deliberately asymmetric.
+
+        A run that dies mid-trajectory writes nothing, because _persist_memory
+        runs at the end -- measured the hard way when a DNS failure killed a
+        run 120 log lines in and left an empty store.
+
+        But checkpointing the LIVE set would be worse than not checkpointing.
+        `live` means "still held when the run finished". A checkpoint at step
+        12 of 30 that stamped the then-current population as live would be
+        recording a claim the run never made, and the next run would seed from
+        a board that was still mid-argument. So:
+
+          retired   written as it happens. A retirement is already final --
+                    the commitment left the population, and a later crash does
+                    not make that untrue.
+          live      written only at the end, by _persist_memory.
+
+        The conservative failure follows: a crashed run leaves its last
+        population marked retired, because there was no end at which to hold
+        it. That is the right way round.
+        """
+        if not getattr(self.args, 'memory', False):
+            return None
+        if not (getattr(self, '_retired', None) or {}):
+            return None
+        return self._persist_memory(None, retired_only=True)
+
+    def _persist_memory(self, hypotheses_list, retired_only=False):
+        """Write this run's commitments to the durable store. Off by default.
+
+        WRITES BOTH HALVES. The retired pool alone would remember exactly what
+        the filter decided to stop believing; the live standing particles are
+        what "carries a board across a corpus" actually means.
+
+        Peak weight, not final weight, for the live ones too -- a commitment
+        that led at step 12 and was merely holding on at the end is a better
+        candidate than one that drifted up on the last step. `_retired`
+        already stores peaks for the same reason.
+
+        Instrumentation only: it runs after dump() and cannot affect the
+        trace, so a broken store degrades the feature and not the run.
+        """
+        if not getattr(self.args, 'memory', False):
+            return None
+        try:
+            import memory as _mem
+        except ImportError:
+            return None
+        cfg = _mem.config_hash(self.args)
+        root = getattr(self.args, 'memory_dir', 'musing_out')
+        corpus = getattr(self.args, 'corpus', None)
+        if not corpus:
+            # Refuse rather than write to memory/unknown/, where two corpora
+            # would silently merge under one token.
+            print(Panel("memory: no corpus on args -- refusing to write",
+                        style="red", box=box.SIMPLE_HEAD))
+            return None
+        token = self.target_agent
+        try:
+            store = _mem.load(root, corpus, cfg, token)
+        except ValueError as e:
+            print(Panel(f"memory: refusing to load -- {e}", style="red", box=box.SIMPLE_HEAD))
+            return None
+        thread = getattr(self.args, 'memory_span_id', None)
+        if isinstance(thread, str):
+            # A constant ordinal makes every span adjacent to every other, so
+            # _non_adjacent is False everywhere and consolidation can never
+            # fire -- measured: three spans, 8 commitments in >1 span, 0
+            # eligible. The ordinal has to come from the corpus, and it has to
+            # be corpus-wide: ordinals computed over a run's own sets come out
+            # consecutive and reproduce the same bug.
+            ordinal = 0
+            sids = getattr(self.args, 'set_ids', None) or getattr(self.args, 'span_sets', None)
+            if sids:
+                if isinstance(sids, str):
+                    sids = [x.strip() for x in sids.split(',') if x.strip()]
+                try:
+                    tm = _mem.thread_map_for(corpus)
+                    ords = [tm[x]['ordinal'] for x in sids if x in tm]
+                    ordinal = min(ords) if ords else 0
+                except (OSError, ValueError, KeyError):
+                    ordinal = 0
+            thread = {'id': thread, 'ordinal': ordinal}
+
+        # Peak over the whole run, keyed by anchor.
+        peak, last = {}, {}
+        for hyps in (hypotheses_list or []):
+            if hyps is None:
+                continue
+            for i, h in enumerate(getattr(hyps, 'hypotheses', []) or []):
+                a = (getattr(h, 'anchor', None) or '').strip()
+                if not a:
+                    continue
+                w = float(hyps.weights[i]) if hyps.weights is not None and i < len(hyps.weights) else 0.0
+                peak[a] = max(peak.get(a, 0.0), w)
+                last[a] = h
+        live = set()
+        if not retired_only and hypotheses_list and hypotheses_list[-1] is not None:
+            live = {(getattr(h, 'anchor', None) or '').strip()
+                    for h in (hypotheses_list[-1].hypotheses or [])}
+            live.discard('')
+
+        n = 0
+        for a, h in last.items():
+            # PROVENANCE. A commitment this run RESTORED from the store did not
+            # recur -- the store put it there. Counting its thread stamp as
+            # independent evidence would let any restored commitment
+            # consolidate itself after two runs, which is circular and would
+            # have fired silently. Only appearances the filter generated on its
+            # own count toward the non-adjacent-threads test.
+            th = thread
+            if th and a in (getattr(self, '_restored_anchors', None) or set()):
+                th = dict(th, restored=True)
+            _mem.put(store, anchor=a, text=getattr(h, 'text', '') or '',
+                     standard=getattr(h, 'standard', None),
+                     method=getattr(h, 'method', None),
+                     root_id=getattr(h, 'root_id', None),
+                     peak=peak.get(a, 0.0),
+                     state='live' if a in live else 'retired',
+                     thread=th, run_id=getattr(self.args, 'run_id', None))
+            n += 1
+        # Anything already retired mid-run carries its exit path, which the
+        # live snapshot cannot supply.
+        for a, v in (getattr(self, '_retired', {}) or {}).items():
+            _mem.put(store, anchor=a, text=v.get('text') or '',
+                     standard=v.get('standard'), method=v.get('method'),
+                     root_id=v.get('root_id'), peak=float(v.get('peak') or 0.0),
+                     state='retired', reason=v.get('reason'), thread=thread,
+                     run_id=getattr(self.args, 'run_id', None),
+                     revivals=int(v.get('revivals') or 0))
+        # Trim before writing, not after: an unbounded store grows the revival
+        # prompt without bound, which is the same reason `_retired` is capped
+        # at 40 inside a run. Recency-weighted so a commitment that led once a
+        # year ago loses to one that led twice last month.
+        if not retired_only:
+            dropped = _mem.evict(store, thread_ordinal=(thread or {}).get('ordinal', 0))
+            if dropped:
+                gaps = [d['threads_seen'] for d in dropped]
+                print(Panel(f"memory: evicted {len(dropped)} "
+                            f"(threads-seen min {min(gaps)} max {max(gaps)})",
+                            style="yellow", box=box.SIMPLE_HEAD))
+        path = _mem.save(root, corpus, cfg, token, store)
+        print(Panel(f"memory: {len(store['records'])} commitments "
+                    f"({n} from this run) -> {path}",
+                    style="green", box=box.SIMPLE_HEAD))
+        return path
 
     def trace(self, input_text, target_agent=None):
         # check if the input text, target_character is cached 

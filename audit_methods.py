@@ -45,7 +45,7 @@ import os
 import re
 import sys
 
-from methods import METHODS, FAMILIES, family_of
+from methods import METHODS, family_of
 from restatement import BOUND, bag, stem
 
 # A clause has to survive this many steps to count as anything but noise. Three
