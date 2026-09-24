@@ -1885,3 +1885,66 @@ input:
 - ties are labels and `OTHER` is always offered, so nothing is discarded.
 
 17 test files pass; `splits.json` and `baseline_metrics.json` both still verify.
+
+---
+
+# OUTCOME — the Avalon converter
+
+`avalon_ingest.py`. Verified through the real code paths: `choice_points.load()`
+reads the emitted file and `run_musing.load_corpus('avalon')` loads 20 sets
+(first game 349 turns, speakers P1-P6 plus GAME).
+
+```
+20 games -> 1,436 points, 0 rejects
+  scored   include/exclude   740   over 148 proposals, batch size 5
+  evidence party_vote        696   mean 5.8 per player-game, median 6, max 13
+
+include labels  exclude 385 / include 355
+vote labels     yes 493 / no 203
+```
+
+Every figure reproduces the pre-converter measurements exactly.
+
+### Both streams through the gate, doing what they were registered to do
+
+```
+include (SCORED)             n=740  people=101  k=2
+  [PASS] majority_share      0.5203  limit 0.6500
+  [PASS] entropy_frac        0.9988
+  [PASS] loo_person_constant 0.4649  limit 0.6000        OVERALL PASS
+
+party_vote (EVIDENCE ONLY)   n=696  people=120  k=2
+  [FAIL] majority_share      0.7083  limit 0.6500
+  [FAIL] loo_person_constant 0.6264  limit 0.6000        OVERALL FAIL
+```
+
+The vote stream failing is **the registered design, not a defect**. It carries
+the only genuine per-player sequence in the corpus (5.8 choices per player-game
+against the include stream's 1.5 proposals per leader-game), and it is marked
+`scored: false` so the filter updates weights on it while the headline log-score
+cannot read it.
+
+### Leakage
+
+A scan over all 1,436 prefixes: **no belief record and no endgame line in any of
+them**. Endgame messages are dropped from the corpus text outright rather than
+merely excluded from prefixes, so nothing downstream can reach them by accident.
+
+One number recorded so the distinction is explicit rather than assumed:
+**486 of 1,436 prefixes contain a role word** -- `merlin`, `morgana`,
+`assassin` and so on. That is **players speculating aloud in chat**, which is the
+substance of the game and exactly what a motive model should be reading. It is
+not answer-key leakage. The key's contents -- assigned roles, recorded beliefs
+about other players, and the per-message persuasion/deception self-labels -- are
+written to `data/avalon/answer_keys/` and appear in no corpus file and no prefix.
+
+### Hindsight obligations discharged (6 new tests, 15 in the file)
+
+- endgame never reaches a prefix **or the corpus text**;
+- a proposal is not in its own prefix, and neither is its own vote outcome;
+- vote points are `scored: false` and include points are `scored: true`;
+- **self-pairs excluded** -- no leader is ever asked about themselves;
+- **a proposal is one observation** -- every point in a batch shares one
+  `batch_id` and carries `batch_size == len(batch)`, which is the `m` for the
+  tempered `(prod p)^(1/m)`;
+- roles, beliefs and deception labels appear in no corpus file.

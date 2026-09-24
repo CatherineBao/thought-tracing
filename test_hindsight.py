@@ -156,6 +156,102 @@ def test_ties_are_labels_and_nothing_is_discarded():
     assert C.claim_label({"Firewood": "1", "Food": "1", "Water": "1"}) == "Firewood+Food+Water"
 
 
+# -- Avalon ----------------------------------------------------------------
+
+import avalon_ingest as A
+
+
+def _game():
+    def msg(pl, t, q=1, tn=1):
+        return {"player": pl, "msg": t, "mid": f"m{abs(hash(t))%9999}", "quest": q, "turn": tn}
+    msgs = [msg("system", "game started!"),
+            msg("player-1", "i'm good"),
+            msg("system", "player-1 proposed a party: player-1, player-2"),
+            msg("player-3", "i don't trust player-2"),
+            msg("system", "party vote outcome: player-1: yes, player-2: yes, player-3: no, "
+                          "player-4: yes, player-5: no, player-6: yes"),
+            msg("system", "vote succeeded! initiating quest vote!"),
+            msg("system", "quest succeeded!"),
+            msg("system", "good won for now, but the assassin..."),
+            msg("player-4", "player-1 was obviously merlin the whole time"),
+            msg("system", "the assassin didn't find merlin, thus the forces of good win!")]
+    return {"users": {str(i): {"name": f"player-{i}", "index": i, "role": r}
+                      for i, r in enumerate(["merlin", "percival", "morgana",
+                                             "assassin", "servant-1", "servant-2"], 1)},
+            "messages": {str(i + 1): m for i, m in enumerate(msgs)},
+            "beliefs": {"1": {"player": "player-6", "about_player": "player-4",
+                              "belief": "morgana", "quest": 1, "turn": 2}},
+            "persuasion": {"1": {"mid": msgs[1]["mid"], "persuasion": "assertion",
+                                 "deception": "lie"}}}
+
+
+def test_avalon_endgame_never_reaches_a_prefix_or_the_corpus():
+    """The assassination phase and post-game chat discuss roles openly."""
+    st_set, points, _, _ = A.convert_game(_game(), 0)
+    assert "assassin didn" not in st_set["full_context"].lower()
+    assert "forces of good" not in st_set["full_context"].lower()
+    for p in points:
+        blob = " ".join(t["text"] for t in p["prefix_turns"]).lower()
+        assert "assassin didn" not in blob and "forces of good" not in blob
+        assert "obviously merlin the whole time" not in blob,             "post-game role talk leaked into a prefix"
+
+
+def test_avalon_prefix_stops_before_its_own_proposal():
+    _, points, _, _ = A.convert_game(_game(), 0)
+    inc = [p for p in points if p["kind"] == "include"]
+    assert inc
+    for p in inc:
+        blob = " ".join(t["text"] for t in p["prefix_turns"])
+        assert "proposed a party" not in blob, "the proposal being forecast is in its own prefix"
+        assert "party vote outcome" not in blob, "its own vote outcome is in the prefix"
+
+
+def test_avalon_vote_points_are_evidence_only():
+    """They fail the gate at 0.708 as a scoring target. The filter may learn from
+    them; the headline log-score may not read them."""
+    _, points, _, _ = A.convert_game(_game(), 0)
+    votes = [p for p in points if p["kind"] == "party_vote"]
+    assert votes, "no vote points produced"
+    assert all(p["scored"] is False for p in votes)
+    assert all(p["scored"] is True for p in points if p["kind"] == "include")
+
+
+def test_avalon_self_pairs_are_excluded():
+    """Leaders include themselves in 0.899 of proposals, so those points are
+    near-trivial."""
+    _, points, _, _ = A.convert_game(_game(), 0)
+    for p in points:
+        if p["kind"] == "include":
+            assert p["subject"] != p["person"], "a leader was asked about themselves"
+
+
+def test_avalon_proposal_is_one_observation():
+    """The leader must pick exactly k, so the pairs are tied. They share a
+    batch_id and carry the m for the tempered (prod p)^(1/m)."""
+    _, points, _, _ = A.convert_game(_game(), 0)
+    inc = [p for p in points if p["kind"] == "include"]
+    batches = collections.defaultdict(list)
+    for p in inc:
+        batches[p["batch_id"]].append(p)
+    for bid, group in batches.items():
+        assert len({p["batch_size"] for p in group}) == 1
+        assert group[0]["batch_size"] == len(group), (bid, len(group))
+
+
+def test_avalon_answer_key_fields_are_not_in_the_corpus_file():
+    """Roles, beliefs and the deception self-labels give the game away."""
+    _, _, key, _ = A.convert_game(_game(), 0)
+    assert key["roles"]["P1"] == "merlin"
+    assert key["message_labels"][0]["deception"] == "lie"
+    path = os.path.join(A.MUSING, "avalon_dialogue.json")
+    if os.path.exists(path):
+        blob = open(path, encoding="utf-8").read().lower()
+        for field in ("\"role\"", "value2issue", "\"deception\"", "about_player"):
+            assert field not in blob, f"corpus file carries {field}"
+
+
+import collections  # noqa: E402  (used by the batch test above)
+
 if __name__ == '__main__':
     import sys
     fns = [(n, f) for n, f in sorted(globals().items())
