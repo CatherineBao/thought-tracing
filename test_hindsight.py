@@ -296,6 +296,86 @@ def test_entropy_guard_flags_a_varying_label_space():
     assert res["pass"], "majority_share still carries the balance question"
 
 
+# -- Diplomacy -------------------------------------------------------------
+
+import diplomacy_ingest as D
+
+
+def test_diplomacy_tie_break_is_visible_not_alphabetical():
+    """16.4% of signed labels tie on order count. Alphabetical is noise nobody
+    could predict, so the registered order is supply centre -> more units ->
+    alphabetical, and the residual arbitrary rate is reported."""
+    # two powers tie on count; only one targets a supply centre (BUD)
+    atk = collections.Counter({"Austria": 2, "Italy": 2})
+    prov = {("attack", "Austria"): {"BUD"}, ("attack", "Italy"): {"TYR"}}
+    label, depth = D.primary_target(atk, collections.Counter(), prov)
+    assert label == "attack:Austria", label
+    assert depth == 1, "the supply-centre rule should have settled it"
+    # neither targets a centre -> falls through to alphabetical, flagged depth 3
+    prov2 = {("attack", "Austria"): {"TYR"}, ("attack", "Italy"): {"PIE"}}
+    label2, depth2 = D.primary_target(atk, collections.Counter(), prov2)
+    assert depth2 == 3, "an arbitrary tie must be FLAGGED, not silently taken"
+
+
+def test_diplomacy_label_is_signed():
+    """`Germany` cannot mean both attacking and supporting Germany -- they are
+    opposite motives, and neither the motive reading nor the lie metric survives
+    conflating them."""
+    atk = collections.Counter({"Germany": 2})
+    sup = collections.Counter({"Germany": 1})
+    label, _ = D.primary_target(atk, sup, {("attack", "Germany"): {"MUN"}})
+    assert label == "attack:Germany"
+    label2, _ = D.primary_target(collections.Counter(), sup,
+                                 {("support", "Germany"): {"MUN"}})
+    assert label2 == "support:Germany"
+    assert label != label2, "direction must be part of the label"
+
+
+def test_diplomacy_supply_centres_are_the_standard_34():
+    assert len(D.SUPPLY_CENTRES) == 34
+    for home in ("VIE", "LON", "PAR", "BER", "ROM", "MOS", "CON"):
+        assert home in D.SUPPLY_CENTRES
+    for neutral in ("NWY", "BEL", "SPA", "TUN", "SER", "GRE"):
+        assert neutral in D.SUPPLY_CENTRES
+    assert "TYR" not in D.SUPPLY_CENTRES and "BUR" not in D.SUPPLY_CENTRES
+
+
+def test_diplomacy_adjacency_excludes_the_supporter_to_supported_origin_edge():
+    """The repaired map. A SUPPORT at S for X->Y means S is adjacent to Y and X
+    is adjacent to Y. It does NOT mean S is adjacent to X, and unioning that
+    edge is what took mean degree to 12.6."""
+    phases = {(1, "1901", "Spring"): {
+        "France": {"PAR": {"type": "SUPPORT", "from": "MAR", "to": "BUR"}}}}
+    adj = D.build_adjacency(phases)
+    assert "BUR" in adj.get("PAR", []), "supporter must reach the target"
+    assert "BUR" in adj.get("MAR", []), "the supported move is itself an edge"
+    assert "MAR" not in adj.get("PAR", []), \
+        "supporter-to-supported-origin is NOT adjacency"
+
+
+def test_diplomacy_convoys_create_no_adjacency():
+    phases = {(1, "1901", "Spring"): {
+        "England": {"NTH": {"type": "CONVOY", "from": "LON", "to": "BEL"}}}}
+    adj = D.build_adjacency(phases)
+    assert "BEL" not in adj.get("LON", []), "a convoy is not adjacency"
+
+
+def test_diplomacy_winter_is_not_a_movement_phase():
+    """Winter is adjustment only -- BUILD and DISBAND carry no attack or
+    support, so a Winter point would be NONE by construction."""
+    assert "Winter" not in D.MOVEMENT
+    assert D.SEASON_ORDER["Spring"] < D.SEASON_ORDER["Fall"] < D.SEASON_ORDER["Winter"]
+
+
+def test_diplomacy_season_ordering_prevents_the_fall_before_spring_leak():
+    """Bucketing by YEAR alone would put Fall messages before Spring orders and
+    leak the Spring outcome. The season field exists, so it is used."""
+    earlier = (1901, D.SEASON_ORDER["Spring"])
+    later = (1901, D.SEASON_ORDER["Fall"])
+    assert earlier < later
+    assert (1901, D.SEASON_ORDER["Fall"]) < (1902, D.SEASON_ORDER["Spring"])
+
+
 import collections  # noqa: E402  (used by the batch test above)
 
 if __name__ == '__main__':

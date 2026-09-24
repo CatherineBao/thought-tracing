@@ -2029,3 +2029,98 @@ That is the third check in this project found returning a plausible wrong number
 reading the corpus majority when 1,030 dialogues collapsed into two people. All
 three passed while measuring nothing, which is the failure mode worth naming:
 a check that crashes gets fixed, a check that returns 0.2417 gets quoted.
+
+---
+
+# OUTCOME — the Diplomacy converter
+
+`diplomacy_ingest.py`. Verified through the real code paths: `choice_points.load()`
+reads the emitted file and `run_musing.load_corpus('diplomacy')` loads 12 sets
+(game 1 is 2,618 turns).
+
+```
+12 games, 17,289 messages, 342 phases -> 1,058 choice points over 83 (game, power) units
+
+alternatives offered   mean 6.97   median 7   MAX 13     <- fits the A-M scheme exactly
+labels   NONE 368 | attack:Austria 104 | attack:France 97 | attack:Russia 92
+         attack:Germany 77 | attack:Turkey 72 | attack:Italy 64 | attack:England 58
+adjacency  75 provinces, mean degree 7.47
+```
+
+### The gate, with more headroom than forecast
+
+```
+n = 1,058   people = 83   k = 6.97
+
+  [PASS] majority_share      0.3478   limit 0.4005   headroom 0.0527
+  [N/A ] entropy_frac        1.1470   label space varies across points
+  [PASS] loo_person_constant 0.3299   limit 0.6000
+  OVERALL PASS
+```
+
+Headroom is **0.0527**, not the 0.035 registered earlier. The earlier estimate
+used the *polluted* adjacency, which over-counted contacts and put mean k at
+8.45; the repaired map gives 6.97, and the limit rises as k falls. The thinnest
+margin in the project got wider by fixing a bug, not by moving a threshold.
+
+**The entropy guard fired on a second corpus**, unprompted: `entropy_frac`
+1.1470 is again above 1, because the offered set varies from 3 to 13 across
+points while the pooled vocabulary is larger. Reported N/A with
+`majority_share` carrying the balance question, exactly as registered for
+Avalon's joint subset. A guard that only ever fires on the case it was built for
+is not a guard; this one generalised.
+
+### The tie-break, measured
+
+```
+clear (no tie)                885   0.836
+settled by SUPPLY CENTRE       67   0.063
+settled by units committed      0   0.000
+ALPHABETICAL (arbitrary)      106   0.100
+```
+
+The visible rule cut the arbitrary rate from the registered **16.4%** to
+**10.0%** -- the supply-centre test resolves 67 of 173 ties. The units-committed
+rule **never fires**, because tied targets are almost always hit by one unit
+each; it is kept for completeness and its zero rate is reported rather than
+quietly dropped.
+
+### Cross-player simultaneity holds
+
+```
+phases with 2 or more players acting         210 of 218
+phases where players were given DIFFERENT prefixes    0
+```
+
+All seven powers order at once, so a prefix for phase *t* is built from
+**strictly earlier phases only** and every player in a phase receives a
+byte-identical one. Nothing from phase *t* -- any player's orders, any player's
+messages, the adjudicated result -- reaches it. This is the failure a nonce test
+over a single actor never reaches, and 210 phases exercise it.
+
+### Nothing is discarded
+
+11 points had a real target the reconstructed map could not see (the map is
+permissive but not omniscient). They become **`OTHER`**, not deletions --
+dropping them would be selection on the outcome.
+
+### Answer key
+
+`speaker_intention`, `receiver_perception` and the per-message annotations are
+written to `data/diplomacy/answer_keys/`. Verified: the corpus file contains
+neither `speaker_intention` nor `sender_label`.
+
+### Hindsight obligations (7 new tests, 24 in the file)
+
+The signed label distinguishes attack from support; the supply-centre tie-break
+fires before alphabetical and an arbitrary tie is **flagged** rather than
+silently taken; the 34 supply centres are the standard list; the repaired
+adjacency admits supporter-to-target and supported-move edges but **not**
+supporter-to-supported-origin, which is what took degree to 12.6; convoys create
+no adjacency; Winter is not a movement phase; and season ordering makes
+`Fall 1901 < Spring 1902`, which is what stops the year-only bucketing leak.
+
+**All three converters are now done and gated.** CaSiNo (M1 calibration),
+Avalon (joint subset primary, votes as unscored evidence), Diplomacy (signed
+primary target). 17 test files pass; `splits.json` and `baseline_metrics.json`
+both still verify.
