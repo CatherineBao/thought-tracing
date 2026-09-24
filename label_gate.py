@@ -164,6 +164,27 @@ def normalised_entropy(labels, k: float = None) -> float:
     return h / math.log(k)
 
 
+def entropy_is_interpretable(stats) -> bool:
+    """False when the label space VARIES ACROSS POINTS and pooling breaks it.
+
+    normalised_entropy divides pooled entropy by log(k), k = alternatives
+    OFFERED at a point. That is right when every point offers the same label
+    space. It is not right when the space varies: Avalon's joint party-subset
+    choice offers 6 or 11 subsets per proposal but the union across proposals is
+    41 distinct labels, so pooled H exceeds log(10.22) and the ratio came back
+    at 1.5215 -- a normalised entropy above 1, which is impossible and is the
+    metric saying it has been misapplied.
+
+    The guard is a ratio > 1 in effect, but it is stated as the CAUSE (more
+    distinct labels than a point ever offers) so the diagnosis travels with it.
+    Where this is False the entropy check is reported as N/A and the
+    majority-share check carries the balance question -- that one is per-label
+    and stays valid whatever the space does.
+    """
+    k = stats.get("mean_alternatives") or 0
+    return bool(k) and len(stats.get("label_counts") or {}) <= k
+
+
 def loo_constant_accuracy(by_person) -> float:
     """Pooled leave-one-out accuracy of a PER-PERSON constant.
 
@@ -278,9 +299,15 @@ def evaluate(stats, options_only_acc=None, context_neutral_acc=None,
         {"gate": "majority_share", "value": stats["majority_share"],
          "limit": majority_limit(stats.get("mean_alternatives")), "better": "lower",
          "pass": stats["majority_share"] <= majority_limit(stats.get("mean_alternatives"))},
-        {"gate": "entropy_frac", "value": stats["entropy_frac"],
-         "limit": ENTROPY_MIN_FRAC, "better": "higher",
-         "pass": stats["entropy_frac"] >= ENTROPY_MIN_FRAC},
+        ({"gate": "entropy_frac", "value": stats["entropy_frac"],
+          "limit": ENTROPY_MIN_FRAC, "better": "higher",
+          "pass": stats["entropy_frac"] >= ENTROPY_MIN_FRAC}
+         if entropy_is_interpretable(stats) else
+         {"gate": "entropy_frac", "value": stats["entropy_frac"],
+          "limit": ENTROPY_MIN_FRAC, "better": "higher", "pass": True,
+          "note": "N/A -- the label space varies across points, so pooled "
+                  "entropy normalised by a per-point k is not interpretable; "
+                  "majority_share carries the balance question"}),
         {"gate": "loo_person_constant", "value": stats["loo_person_constant"],
          "limit": LOO_CONSTANT_MAX, "better": "lower",
          "pass": stats["loo_person_constant"] <= LOO_CONSTANT_MAX},

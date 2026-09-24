@@ -250,6 +250,52 @@ def test_avalon_answer_key_fields_are_not_in_the_corpus_file():
             assert field not in blob, f"corpus file carries {field}"
 
 
+def test_avalon_no_voter_sees_another_voter_on_the_same_proposal():
+    """VOTES ARE SIMULTANEOUS ACROSS PLAYERS, not just within one.
+
+    All six vote on a proposal at once, so player B's prefix for proposal p must
+    not contain player A's vote on p. This is the same cross-player problem as
+    Diplomacy's simultaneous orders, and the fixture below is the second-actor
+    case that a nonce test over a single actor would never reach.
+    """
+    _, points, _, _ = A.convert_game(_game(), 0)
+    votes = [p for p in points if p["kind"] == "party_vote"]
+    assert len(votes) >= 2, "need at least two voters to test the cross-player case"
+    by_batch = collections.defaultdict(list)
+    for v in votes:
+        by_batch[v["batch_id"]].append(v)
+    for bid, group in by_batch.items():
+        assert len(group) >= 2, bid
+        # every voter on one proposal sees EXACTLY the same prefix ...
+        blobs = {" ".join(t["text"] for t in v["prefix_turns"]) for v in group}
+        assert len(blobs) == 1, f"{bid}: voters were given different prefixes"
+        # ... and that prefix contains nobody's vote
+        blob = blobs.pop().lower()
+        assert "party vote outcome" not in blob, \
+            "the vote outcome line -- which names every vote -- is in a voter's prefix"
+        for v in group:
+            assert f"{v['person'].lower()}: yes" not in blob
+            assert f"{v['person'].lower()}: no" not in blob
+
+
+def test_entropy_guard_flags_a_varying_label_space():
+    """A normalised entropy above 1 is impossible; it means the check was
+    applied to a label space that varies across points. Avalon's joint subset
+    choice offers 6 or 11 subsets per proposal but 41 distinct labels pooled."""
+    import label_gate as lg
+    varying = {"mean_alternatives": 10.22, "label_counts": {i: 1 for i in range(41)}}
+    fixed = {"mean_alternatives": 8, "label_counts": {i: 1 for i in range(7)}}
+    assert not lg.entropy_is_interpretable(varying)
+    assert lg.entropy_is_interpretable(fixed)
+    res = lg.evaluate({"majority_share": 0.10, "entropy_frac": 1.52,
+                       "loo_person_constant": 0.07, "mean_alternatives": 10.22,
+                       "label_counts": {i: 1 for i in range(41)}, "points": 148,
+                       "people": 101})
+    ent = [c for c in res["checks"] if c["gate"] == "entropy_frac"][0]
+    assert "N/A" in (ent.get("note") or ""), "the guard must SAY it is not interpretable"
+    assert res["pass"], "majority_share still carries the balance question"
+
+
 import collections  # noqa: E402  (used by the batch test above)
 
 if __name__ == '__main__':

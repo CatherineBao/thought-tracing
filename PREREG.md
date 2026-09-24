@@ -1948,3 +1948,84 @@ written to `data/avalon/answer_keys/` and appear in no corpus file and no prefix
   `batch_id` and carries `batch_size == len(batch)`, which is the `m` for the
   tempered `(prod p)^(1/m)`;
 - roles, beliefs and deception labels appear in no corpus file.
+
+---
+
+## Avalon, three registrations before the first Diplomacy model call
+
+### 1. The joint party-subset is the PRIMARY scored unit; pairs become secondary
+
+The tempered `(prod p)^(1/m)` is an approximation: it treats five linked
+include/exclude decisions as separate and then down-weights them. A proposal is
+really **one choice of a team from a small set**, and the set is small enough to
+score exactly. Counted:
+
+```
+148 proposals   party sizes  4:67  3:58  2:23
+leader leaves self OFF              15/148 = 0.101
+
+label = which of the 5 others are on the team
+alternatives offered per proposal   11 (x125), 6 (x23)   mean 10.2
+                                    = C(5, k-1) subsets, PLUS `OTHER`
+
+n=148  people=101  distinct labels 41
+  [PASS] majority_share      0.1014   limit 0.3685
+  [PASS] loo_person_constant 0.0743   limit 0.6000
+```
+
+`OTHER` absorbs the 10.1% of proposals where the leader leaves themselves off,
+so **nothing is discarded** and the exclusion is not selection on the outcome.
+Max 11 alternatives fits the registered A-M scheme.
+
+**It costs no statistical power.** Both units cluster on the same 101
+leader-games, so the pair unit's 740 points were never 740 independent
+decisions -- which is precisely why the tempered product existed. The joint unit
+gives an **exact likelihood with no dependency approximation**, so it is primary
+and the pairs are kept as a secondary reading.
+
+### 2. The vote stream gets its own controls, because it drives most of the weight
+
+At 5.8 votes against 1.5 proposals per player-game, roughly **80% of each
+person's weight updates come from a stream no gate has checked for forecast
+quality**. Badly calibrated vote forecasts could steer the population away from
+what predicts the scored choice, and the headline would never show why. Three
+additions, registered now:
+
+- **Calibration.** The vote stream gets its **own dev-fitted temperature**, like
+  every other arm. Standing rule 9 applies to it even though it is never scored.
+- **Logging.** Each step records **how much of its weight movement came from
+  each stream**, so the split is readable offline rather than inferred.
+- **An ablation.** The same filter updating on **include/exclude only** against
+  **include/exclude plus votes**. This is the only way to learn whether the
+  evidence stream helps the scored one, hurts it, or does nothing, and it is
+  registered before either is run so the answer cannot be chosen afterwards.
+
+### 3. Votes are simultaneous ACROSS players
+
+The registered batch-reveal covered the pairs inside one proposal. The finer case
+is that all six players vote on a proposal at once, so **player B's prefix for
+proposal p must not contain player A's vote on p**. Now tested: every voter on a
+proposal is given byte-identical prefix, that prefix contains no
+`party vote outcome` line, and no voter's own vote appears in it. This is the
+same cross-player problem as Diplomacy's simultaneous orders, and the fixture is
+the second-actor case a single-actor nonce test would never reach.
+
+### A third check caught reporting a number that could not be true
+
+The joint-subset measurement returned **`entropy_frac` = 1.5215**. A normalised
+entropy cannot exceed 1. `normalised_entropy` divides pooled entropy by `log(k)`
+with k = alternatives offered **at a point**, which is correct only when every
+point offers the same label space. Avalon's joint choice offers 6 or 11 subsets
+per proposal while the union across proposals is 41 labels, so pooled H exceeds
+`log(10.22)`.
+
+Added `entropy_is_interpretable`, stated as the CAUSE rather than as a ratio
+clamp, so the diagnosis travels with the flag: where the label space varies, the
+entropy check reports **N/A** and `majority_share` carries the balance question,
+being per-label and valid whatever the space does.
+
+That is the third check in this project found returning a plausible wrong number
+-- after the flat 0.45 limit unreachable at k=2, and `loo_person_constant`
+reading the corpus majority when 1,030 dialogues collapsed into two people. All
+three passed while measuring nothing, which is the failure mode worth naming:
+a check that crashes gets fixed, a check that returns 0.2417 gets quoted.
