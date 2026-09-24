@@ -1721,3 +1721,95 @@ filter number is always read against what the likelihood could express at best.
 `forecast_backend.json` may now be written for the ranking scorer once the checks
 are re-run at the larger Diplomacy option set (up to 13), since positional bias
 and calibration can behave differently over thirteen options than over seven.
+
+---
+
+## DECISION — log-probabilities are dropped as the primary. The ranking scorer IS the scorer.
+
+Two independent findings converge, so this is a decision rather than a
+concession.
+
+**From the measurement:** the declared-ranking scorer works. Oracle lift
+**+0.178 nats**, top-1 **0.350** against a 0.234 constant, format compliance
+**1.000**, determinism **exact**, and -- the control Phase CP failed -- a
+scrambled portfolio scores **worse than no portfolio**. The likelihood can carry
+a motive with no access to token probabilities.
+
+**From the platform:** log-probabilities are **deprecated on the Gemini 3.x
+line**. Every route was already measured closed on this key (two credential
+formats, two SDKs, the OpenAI-compatibility layer, ~15 models), but deprecation
+changes the character of the finding: chasing logprobs would mean **pinning the
+project to older models**, and a pin that is already deprecated is a pin with a
+known expiry. The design would be built on a capability being withdrawn.
+
+So `LogprobScorer` stays in `forecast_likelihood.py` as an interface
+implementation for a future Vertex or OpenAI backend, and is **not the primary
+and not a blocker**. `forecast_backend.json` is written for the **ranking
+scorer**.
+
+**What is given up, stated so it is not rediscovered as a surprise.**
+
+| logprobs would have given | what the ranking scorer does instead |
+|---|---|
+| an exact distribution from ONE call | a declared order plus a dev-fitted THETA; the spread is calibrated, not read |
+| no positional bias | measured bias -- 27.5% of points move >0.15 TV under a reversed option order, so **two-order averaging is mandatory** and doubles the call count |
+| resolution below the epsilon floor for free | resolution set by THETA and the rank, adequate at the option counts in use (7 for CaSiNo, up to 13 for Diplomacy) |
+
+The doubled call count is the real cost and it is folded into the budget formula
+already registered: the `2 x` factor in the forecast term is this.
+
+**Re-run obligation, unchanged.** The checks were measured at 7 options. They are
+re-run at Diplomacy's larger set (up to 13) before any Diplomacy forecast,
+because positional bias and the THETA fit can behave differently over thirteen
+options than over seven. Passing at k=7 is not evidence at k=13.
+
+### Model selection — the newer line works, and `stable` was being measured wrongly
+
+Checks re-run on the ranking scorer across model lines (oracle-portfolio arm,
+CaSiNo dev; small n, so the lift figures are noisy and are NOT compared across
+runs):
+
+```
+model                   thinking  aligned  stable*  theta  lift/unif  top-1   n
+gemini-2.5-flash-lite      yes      1.000   1.000    0.65    +0.3217  0.450   20
+gemini-3.5-flash-lite      n/a      1.000   0.650    0.65    +0.3002  0.600   20
+gemini-3.6-flash            -         rate-limited, "experiencing high demand"
+gemini-3.8-flash            -         rate-limited, "experiencing high demand"
+```
+
+`gemini-3.5-flash-lite` does not accept `thinking_config` at all (400
+INVALID_ARGUMENT), so thinking cannot be disabled on it -- yet **format
+compliance is still 1.000**, which is what the check exists to establish.
+
+**`stable*` at 0.650 was a measurement artefact, not instability.** It counted
+EXACT permutation identity. What the filter consumes is the induced
+DISTRIBUTION, and PREREG's registration of this check already said "within a
+declared tolerance". Measured properly, as total variation between the
+distributions:
+
+```
+gemini-3.5-flash-lite, 15 points, THETA = 0.65
+
+  TV between two SINGLE draws    median 0.000   mean 0.025   p90 0.069
+  TV between two 3-SAMPLE MEANS  median 0.005   mean 0.015   p90 0.028
+
+  single draws within TV < 0.15:   1.000
+  3-sample means within TV < 0.15: 1.000
+```
+
+**Every single draw is within tolerance.** The 35% of "unstable" calls were
+rankings that differed in the TAIL positions, which carry almost no mass under a
+0.65 decay. Averaging over repeats is therefore **not required**, and the call
+budget does not multiply again.
+
+**Registered:** the `stable` check is total variation between induced
+distributions at a 0.15 tolerance, not permutation identity. This honours the
+registration rather than relaxing it -- the tolerance was declared before the
+measurement precisely because exact float or token identity was not expected to
+hold on a hosted API.
+
+**Model pinned: `gemini-3.5-flash-lite`.** Newer line, no deprecated dependency,
+format-compliant without needing thinking control, stable within tolerance, and
+better top-1 in the sample measured. `gemini-2.5-flash-lite` is the fallback if
+3.x rate limits bite. The pin goes in `forecast_backend.json` with these numbers,
+and the checks re-run at Diplomacy's 13-option set before any Diplomacy forecast.
