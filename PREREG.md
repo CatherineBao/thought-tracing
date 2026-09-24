@@ -2124,3 +2124,85 @@ no adjacency; Winter is not a movement phase; and season ordering makes
 Avalon (joint subset primary, votes as unscored evidence), Diplomacy (signed
 primary target). 17 test files pass; `splits.json` and `baseline_metrics.json`
 both still verify.
+
+---
+
+# OUTCOME — the scorer at 13 options. QUALIFIED PASS, and the budget changes.
+
+Registered obligation: "passing at k=7 is not evidence at k=13". It was not.
+25 Diplomacy dev points with k >= 9, `gemini-2.5-flash-lite`, 40-turn context.
+
+```
+aligned  (full permutation parsed)     25/25 = 1.000
+stable   (TV < 0.15 between draws)     25/25 = 1.000
+permutation invariance, SINGLE order    2/25 = 0.080     <-- 0.725 at k=7
+THETA fitted on dev (k>=9)                      0.25     <-- 0.75 at k=7
+```
+
+Format and determinism hold at thirteen options. **Permutation invariance
+collapses**: from 0.725 at k=7 to **0.080**. Re-running at the larger set was
+worth the calls.
+
+### The cause is variance, not bias -- which changes the fix
+
+```
+top pick lands on the FIRST rendered slot   10/85 = 0.118   against chance 0.108
+```
+
+**There is no positional prior.** The model does not favour early letters; its
+ranking simply differs between renderings. So a positional de-biasing
+correction -- the obvious remedy, and the one the phrase "positional bias"
+would have led to -- **would not have worked**. Averaging does, roughly as
+`1/sqrt(R)`:
+
+```
+                                  median TV   within 0.15
+1 order vs reversed                   0.326        0.071
+2-order mean vs 2-order mean          0.205        0.286
+4-order mean vs 4-order mean          0.115        0.714
+```
+
+**Two-order averaging is not sufficient at k >= 9.** The registered mandate is
+raised to **four orders** for large option sets, which brings median TV under
+tolerance at 0.115 -- and **28.6% of points still exceed it**, reported rather
+than smoothed over.
+
+**The budget changes.** The `2 x` factor in the forecast term becomes `4 x` for
+Diplomacy and for Avalon's 11-alternative joint proposals; CaSiNo, Avalon's
+include/exclude and Avalon's 6-alternative proposals stay at `2 x`. The
+projected call count is recomputed from that before M1 is launched.
+
+### My own probe was mis-specified, and its headline numbers are void
+
+The large-k run also reported `responsive` 0.960, oracle lift +1.43 nats and
+oracle top-1 0.920. **None of those may be quoted.** The "true portfolio" I
+wrote said the player *"is set on breaking {target} and will move on them rather
+than anyone else"* -- it **names the answer**. Those numbers measure
+instruction-following, not motive inference.
+
+The CaSiNo oracle does not have this defect: its portfolio is a priority ORDER
+over issues while the label is which issue is claimed most, so the model must
+still infer order -> allocation. That is why +0.178 nats stands and +1.43 does
+not.
+
+A valid large-k oracle needs a portfolio that gives a REASON without naming the
+target -- the registered relationship-state type ("a prior phase contained an
+attack between these two powers") is the natural candidate, derived from earlier
+phases and therefore input-side. Deferred to M1 rather than patched here, and
+**Diplomacy has no measured oracle ceiling until then**.
+
+`aligned`, `stable` and `permutation invariance` do not depend on portfolio
+content and are unaffected.
+
+### forecast_backend.json is written
+
+Confirmed per option-set size, because the answer differs by size:
+
+```
+small_k   k <= 7    casino, avalon include, avalon joint(6)   confirmed  2 orders
+large_k   k >= 9    diplomacy, avalon joint(11)               confirmed  4 orders
+```
+
+Thresholds may now be tuned for the corpora whose size is confirmed. The pin
+records the model, temperature, thinking budget, THETA per size, the tolerance,
+the averaging requirement, the residual, and the void oracle arm with the reason.

@@ -1,0 +1,69 @@
+{
+  "_README": "The forecaster this project is pinned to, and the checks it passed. No forecast threshold is tuned until confirmed is true for the option-set size in use. Log-probabilities are NOT used: every Gemini route refuses them and they are deprecated on the 3.x line (PREREG Phase B).",
+  "git_commit": "2a668a28bfc107bc241f3c990bc916749570e911",
+  "scorer": "declared ranking -> geometric rank map, THETA fitted on dev",
+  "model": "gemini-2.5-flash-lite",
+  "fallback_model": "gemini-3.5-flash-lite",
+  "temperature": 0,
+  "thinking_budget": 0,
+  "max_output_tokens": 96,
+  "letter_scheme": "A-M",
+  "tolerance_tv": 0.15,
+  "confirmed_by_option_set": {
+    "small_k": {
+      "range": "k <= 7",
+      "corpora": [
+        "casino",
+        "avalon(include)",
+        "avalon(joint, k=6)"
+      ],
+      "n": 40,
+      "confirmed": true,
+      "aligned": 1.0,
+      "stable_tv": 1.0,
+      "responsive": 0.725,
+      "permutation_invariance_single_order": 0.725,
+      "theta_dev": 0.75,
+      "orders_required": 2,
+      "oracle_lift_nats": 0.1779,
+      "oracle_top1": 0.35,
+      "majority_baseline": 0.234
+    },
+    "large_k": {
+      "range": "k >= 9 (max 13)",
+      "corpora": [
+        "diplomacy",
+        "avalon(joint, k=11)"
+      ],
+      "n": 25,
+      "confirmed": true,
+      "aligned": 1.0,
+      "stable_tv": 1.0,
+      "permutation_invariance_single_order": 0.08,
+      "theta_dev": 0.25,
+      "orders_required": 4,
+      "orders_evidence": {
+        "1_order_vs_reversed": {
+          "median_tv": 0.326,
+          "within_tol": 0.071
+        },
+        "2_order_means": {
+          "median_tv": 0.205,
+          "within_tol": 0.286
+        },
+        "4_order_means": {
+          "median_tv": 0.115,
+          "within_tol": 0.714
+        }
+      },
+      "residual_outside_tolerance_at_4_orders": 0.286,
+      "oracle_arm": "INVALID -- see note",
+      "note": "The responsive/oracle arm at large k was MIS-SPECIFIED: the 'true portfolio' named the actual target power outright, so responsive 0.960 and top-1 0.920 measure instruction-following, not motive inference. They are NOT a ceiling and are not quoted. aligned, stable and permutation do not depend on portfolio content and stand."
+    }
+  },
+  "positional_bias": {
+    "top_pick_on_first_rendered_slot": 0.118,
+    "chance": 0.108,
+    "reading": "NOT a positional prior. The instability is order SENSITIVITY as VARIANCE -- the ranking differs between renderings without favouring early letters -- which is why averaging reduces it roughly as 1/sqrt(R) and a positional de-biasing correction would not have helped."
+  }
+}
