@@ -2309,3 +2309,67 @@ clusters. This run can exclude a large positive lift; it cannot distinguish a
 small one from zero. What it does establish without ambiguity is that the
 hypothesis arm does **not** beat a constant here, and that the placebo beats it
 on the silent subgroup.
+
+---
+
+## Phase M1-D — four dev-only diagnostics, registered before they run
+
+**The test partition has had its one look. Nothing below may re-read it.** All
+four run on the M1 **dev** split, and each has a branch fixed in advance.
+
+One of them can be partly answered from the record already. The +0.178 oracle
+lift **was** measured on the early cut -- the prefix in that probe came from
+`logs[:cut]` with the same first-allocation rule, mean 3.6 turns. But it is not
+comparable to M1 as it stands: it used a **7-label** set without `OTHER` (k=7)
+and was scored against **uniform**, while M1 uses k=8 and a **majority** bar. So
+it is re-run rather than quoted.
+
+### D1 — the oracle on the early cut, against the M1 bar
+
+Hand the model the **true priority order** from the answer key and forecast the
+same dev points, same k=8 label set, same two renderings. This is explicitly a
+**ceiling measurement, not a forecast**; an oracle arm may never appear in a
+reported result.
+
+- **beats majority** -> the forecaster CAN use a correct motive, and M1's failure
+  is *inference from three turns*. That is a finding about this setting, and the
+  next move is a better prefix (the registered secondary target), not a better
+  forecaster.
+- **does not beat majority** -> the label is mostly driven by things other than
+  the proposer's motive, and the task explanation stands. CaSiNo's allocation on
+  the early cut is then not a motive benchmark at all, and saying so is the
+  result.
+
+### D2 — log-loss split by label type
+
+Tie labels (`Firewood+Food`, 33.5% of the corpus) against single-issue labels,
+per arm, on dev.
+
+- **loss concentrated on ties** -> the problem is the forecast's SHAPE, not
+  missing motive information. A model asked "which issue do they claim most of"
+  has no natural way to say "two equally", and the fix is representational.
+- **loss even across both** -> the shape is not the issue.
+
+### D3 — a prior correction (vector scaling)
+
+Fit **per-class bias terms** on dev alongside THETA -- vector scaling rather than
+a single temperature.
+
+- **brings model arms level with or above majority** -> the forecaster needs a
+  registered calibration change **applied to every arm**, standing rule 9, and M1
+  is re-run under it.
+- **does not** -> calibration is not what is missing.
+
+### D4 — a signal test
+
+Mix each arm with majority at weight lambda fitted on dev:
+`p = (1-lambda)*majority + lambda*arm`.
+
+- **some lambda > 0 improves on majority** -> the arm carries usable signal that
+  calibration was hiding, and the mixture weight is the thing to register.
+- **no lambda > 0 improves** -> the arm carries **no usable signal at all**,
+  whatever its calibration. That is the strongest negative available here and it
+  would close CaSiNo's allocation task rather than merely fail it.
+
+D2, D3 and D4 need **no new calls** -- they are re-analyses of the dev records
+already on disk. Only D1 spends.
