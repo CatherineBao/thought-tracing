@@ -1640,3 +1640,84 @@ truncated preamble. The native SDK's equivalent is
 `ThinkingConfig(thinking_budget=0)`. Without one of these a 4-token cap returns
 reasoning, not the letter -- which is how the earlier probe got
 `"The question asks Alex"`.
+
+---
+
+# OUTCOME — the declared-ranking fallback is VIABLE. ~200 calls, CaSiNo dev, n=40.
+
+`forecast_likelihood.py`. The model is asked to RANK the alternatives, never to
+invent numbers; a geometric map `p(r) ∝ THETA^(r-1)` turns the declared rank into
+a distribution, and THETA is **fitted on dev**. The model supplies the ORDER, the
+dev set supplies the SPREAD. Backend `gemini-2.5-flash-lite`, temperature 0,
+thinking disabled.
+
+### The four checks
+
+```
+aligned  (full permutation parsed)    40/40 = 1.000
+stable   (identical call agrees)      40/40 = 1.000
+responsive (true beats scrambled)     29/40 = 0.725
+permutation invariance  TV < 0.15     29/40 = 0.725
+```
+
+Format compliance is total **once thinking is disabled** -- which is exactly the
+failure the backend probe caught, and it is now a check rather than an
+assumption. Determinism at temperature 0 is exact, so `stable` did not need the
+tolerance that was registered for it.
+
+**Permutation invariance at 0.725 is a problem, not a pass.** On 27.5% of points,
+reversing the option order moves the induced distribution over ACTIONS by more
+than 0.15 total variation. A positional prior of that size reads as a motive
+effect if it is not averaged out, so the two-order averaging registered in the
+design is **mandatory, not optional**, and the residual is reported.
+
+### The arms, THETA fitted per arm on the same points
+
+```
+arm                      n   theta   logscore  lift/unif    top-1
+none (context only)     40    0.95    -1.9730    -0.0271    0.150
+true_portfolio          40    0.75    -1.7680    +0.1779    0.350
+scrambled_portfolio     40    0.95    -2.0114    -0.0655    0.150
+uniform                  -       -    -1.9459     0.0000    0.143
+majority constant        -       -          -          -    0.234
+```
+
+**The context-only ranking carries nothing.** THETA fits to 0.95 -- almost
+uniform, the fit's way of saying the declared order is not informative -- and the
+arm scores *below* uniform at top-1 0.150 against 0.143. That is the early cut
+working as designed: it removed the reading-comprehension shortcut, and 3.6 turns
+of prefix genuinely do not determine the allocation.
+
+**A true portfolio moves it substantially.** THETA drops to 0.75, so the fit now
+believes the order; lift is **+0.178 nats** and top-1 **0.350**, above the
+majority constant's 0.234 and well above uniform.
+
+**A scrambled portfolio is worse than no portfolio at all** (-0.0655 against
+-0.0271). This is the control that matters and it is the one Phase CP failed: a
+think-harder effect, where any extra prompt text helps, would raise both
+portfolio arms together. Here the WRONG motive actively hurts, which is what
+person-specificity looks like.
+
+### What this does and does not establish
+
+**Does:** the likelihood can express a motive without log-probabilities. The
+declared-ranking machinery is not the dead end the context-only arm alone
+suggested, and Phase B's "pause" branch is not triggered.
+
+**Does not:** `true_portfolio` hands the model the ground-truth priority order.
+It is an **ORACLE**, so +0.178 nats and top-1 0.350 are a **ceiling on the
+likelihood's discriminative power**, not a forecast of what the filter will
+reach. The filter infers its portfolios and will get less. n = 40, so top-1 0.350
+against the 0.234 constant is not significant on its own and is not claimed as
+such.
+
+### Decision
+
+Proceed on the declared ranking. Register with it: **two-order averaging is
+mandatory** (the 0.725 invariance says so); THETA is fitted per arm on dev and
+reported; and the **oracle ceiling is quoted beside every later result**, so a
+filter number is always read against what the likelihood could express at best.
+
+`forecast_backend.json` may now be written for the ranking scorer once the checks
+are re-run at the larger Diplomacy option set (up to 13), since positional bias
+and calibration can behave differently over thirteen options than over seven.
