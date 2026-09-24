@@ -1604,3 +1604,39 @@ capability is documented, needs GCP credentials), an **OpenAI key**
 (`top_logprobs` up to 20, exactly the required shape), the pre-registered
 **declared-ranking** fallback, or **pause** the forecaster while the converters
 proceed, since none of them depend on it.
+
+### Addendum 2 — both key formats, both SDKs, and the OpenAI-compatibility endpoint
+
+For the record, because the `AQ.` format was raised as the newer credential type:
+**the `AQ.` key was the one tested first.** The original `.env` held
+`AQ.Ab8...w2xg` (53 chars) and it was used for the first three probes, covering
+roughly fifteen models across every family and tier. It failed identically. The
+`AIzaSy...` key tested afterwards failed identically again. Both formats are on
+record.
+
+A fourth path was then tried and is also closed. Google exposes an
+**OpenAI-compatibility endpoint** at
+`generativelanguage.googleapis.com/v1beta/openai/chat/completions`, which is a
+different code path and nominally accepts OpenAI's `logprobs` / `top_logprobs`:
+
+```
+compat endpoint, no logprobs        -> {"content": "OK"}   endpoint works, key authenticates
+compat endpoint + logprobs          -> 400 Invalid JSON payload: Unknown name "logprobs"
+compat endpoint + top_logprobs      -> 400 Invalid JSON payload: Unknown name "top_logprobs"
+```
+
+The field is not merely disabled there, it is **not part of the schema**.
+
+**Every Google route is now exhausted:** two credential formats, two SDKs, the
+REST compatibility layer, ~15 models, and every naming variant. Log-probabilities
+are not available from the Gemini Developer API by any means reachable with an
+API key. The capability exists on **Vertex AI**, which needs GCP credentials
+rather than an API key, and that is the only remaining Google option.
+
+One incidental finding kept because it will be needed whatever backend is used:
+the compat endpoint accepts `reasoning_effort: "none"`, which suppresses thinking
+tokens and lets a short `max_tokens` return the answer itself rather than a
+truncated preamble. The native SDK's equivalent is
+`ThinkingConfig(thinking_budget=0)`. Without one of these a 4-token cap returns
+reasoning, not the letter -- which is how the earlier probe got
+`"The question asks Alex"`.
