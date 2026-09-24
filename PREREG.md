@@ -2206,3 +2206,106 @@ large_k   k >= 9    diplomacy, avalon joint(11)               confirmed  4 order
 Thresholds may now be tuned for the corpora whose size is confirmed. The pin
 records the model, temperature, thinking budget, THETA per size, the tolerance,
 the averaging requirement, the residual, and the void oracle arm with the reason.
+
+---
+
+# OUTCOME — MILESTONE 1 ON CASINO. **FAILS.** The constant wins again.
+
+1,440 calls, `gemini-2.5-flash-lite`, 2 renderings per point, dev 40 / test 80
+(M1 partition), THETA fitted per arm on dev, bar frozen on dev before test was
+read.
+
+```
+BAR FROZEN ON DEV:  obvious -2.0178  vs  majority -1.8566  ->  MAJORITY
+
+TEST (M1 partition)   n=80 points, 80 people
+  arm               theta   logscore   lift/bar   top-1
+  majority (bar)        -    -1.9071    +0.0000       -
+  hypothesis         0.80    -2.0060    -0.0988    0.200
+  obvious            0.85    -2.0259    -0.1188    0.188
+  context_neutral    0.95    -2.0466    -0.1395    0.163
+  placebo            0.95    -2.0556    -0.1484    0.163
+  swap               0.75    -2.0683    -0.1612    0.175
+
+  clustered permutation p (hypothesis vs bar) = 0.9270
+```
+
+**Every model arm loses to a constant.** The hypothesis arm is the best of them
+and still trails the bar by 0.0988 nats, at p = 0.927 -- not near significance,
+and in the wrong direction.
+
+### The silent subgroup, which was the one genuine test, is worse
+
+```
+TEST, SILENT SUBGROUP   n=53 points, 53 people
+  majority (bar)        -    -1.9085    +0.0000
+  placebo            0.95    -2.0704    -0.1619    0.132
+  hypothesis         0.80    -2.1289    -0.2204    0.170
+  swap               0.75    -2.1656    -0.2571    0.151
+  clustered permutation p = 0.9909
+```
+
+On the points where the person never stated a priority -- the only part of
+CaSiNo where the motive is not spoken aloud -- **a generic placebo portfolio
+beats an inferred one**.
+
+### A defect in my own band check, found by the result
+
+The bands first printed **EFFECT** on both controls. They are wrong when the real
+lift is not positive: with real = -0.0988, half of it is -0.0494, so a swap at
+-0.1612 satisfies `swap < 0.5 * real` and prints EFFECT -- **for an arm that lost
+to the bar**. Phase CP's bands ask whether a real effect is person-specific; they
+are not a way of ranking two failures. Guarded: a non-positive lift now prints
+"THE BANDS DO NOT APPLY" and the controls are reported raw. This is the fourth
+check in this project caught returning a confident wrong answer.
+
+### What this is, and what it is not
+
+**It is not the Phase CP failure repeating.** That run died on a degenerate
+label distribution -- 70% `HOLD`, a constant at 0.656. Here the label gate passed
+cleanly (majority share 0.2417 against a 0.4005 limit, entropy 0.8532) and the
+bar was frozen properly. The task is balanced; the forecasts are simply bad.
+
+**The pre-registered explanation is confirmed, by the arm built to test it.**
+The early-cut entry recorded in advance: *"From three turns in, the final
+allocation depends on the proposer's priorities AND on everything the partner
+does afterwards. Part of the outcome is not explained by the proposer's motives
+at all, so the achievable lift has a lower ceiling than it looks."*
+
+`context_neutral` is the measurement of that ceiling: a model holding the whole
+prefix with no motive at all scores **-0.1395 against the constant**. If a full
+reader of the prefix cannot beat a constant, no portfolio built from that prefix
+can. The early cut removed the reading-comprehension shortcut, and with it the
+signal -- median prefix 3 turns.
+
+**One thing points the other way and is recorded rather than used.** The
+hypothesis arm has the best top-1 of any model arm (0.200 on test, 0.170 on the
+silent subgroup against placebo's 0.132), while having a worse log-score. Its
+dev-fitted THETA is 0.80 against placebo's 0.95, so it is the more peaked
+distribution: more often right at the top, and more heavily penalised when
+wrong. That is a calibration split, not a finding, and n=80 is far too small to
+make anything of it.
+
+### Decision, per the registered table
+
+> **M1 fails on CaSiNo -> STOP.** Do not build the filter on an untested signal
+> -- that was v1's mistake. Either revise the forecaster and re-run M1, or report
+> the negative and halt. No M2 work proceeds.
+
+**No M2 work proceeds.** The registered options are the forecaster (calibration,
+prompt, letter scheme) or the task. The evidence points at the **task**: the
+`context_neutral` ceiling says the prefix does not determine the allocation, so a
+better forecaster on this cut has little to find.
+
+The registered secondary target is the one to try: **the proposer's own first
+explicit proposal**, which reflects their preference more purely than the final
+allocation does, since the final one absorbs everything the partner did
+afterwards. It was recorded as a secondary option precisely because it needs that
+proposal parsed, which reintroduces the hindsight concern -- so it requires its
+own cut rule and its own hindsight test before it may be run.
+
+**Power, stated so the negative is not over-read.** n = 80 test points, 80
+clusters. This run can exclude a large positive lift; it cannot distinguish a
+small one from zero. What it does establish without ambiguity is that the
+hypothesis arm does **not** beat a constant here, and that the placebo beats it
+on the silent subgroup.

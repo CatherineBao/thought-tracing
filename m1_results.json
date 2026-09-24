@@ -1,0 +1,49 @@
+{
+  "TEST (M1 partition)": {
+    "n": 80,
+    "people": 80,
+    "bar": "majority",
+    "lifts": {
+      "context_neutral": -0.13946907796056895,
+      "obvious": -0.11880206026976681,
+      "hypothesis": -0.0988453916399663,
+      "placebo": -0.14844540447839027,
+      "swap": -0.1612213250584087
+    },
+    "p_clustered": 0.9269536523173841,
+    "theta": {
+      "context_neutral": 0.95,
+      "obvious": 0.85,
+      "hypothesis": 0.8,
+      "placebo": 0.95,
+      "swap": 0.75
+    }
+  },
+  "TEST, SILENT SUBGROUP": {
+    "n": 53,
+    "people": 53,
+    "bar": "majority",
+    "lifts": {
+      "context_neutral": -0.1608925568234203,
+      "obvious": -0.20710175182362578,
+      "hypothesis": -0.22039249848750453,
+      "placebo": -0.16186035483073224,
+      "swap": -0.2570573644421281
+    },
+    "p_clustered": 0.9908504574771262,
+    "theta": {
+      "context_neutral": 0.95,
+      "obvious": 0.85,
+      "hypothesis": 0.8,
+      "placebo": 0.95,
+      "swap": 0.75
+    }
+  },
+  "_meta": {
+    "model": "gemini-2.5-flash-lite",
+    "orders": 2,
+    "calls": 1440,
+    "bar": "majority",
+    "perm_rank_move_median": 1
+  }
+}
