@@ -2373,3 +2373,150 @@ Mix each arm with majority at weight lambda fitted on dev:
 
 D2, D3 and D4 need **no new calls** -- they are re-analyses of the dev records
 already on disk. Only D1 spends.
+
+---
+
+# OUTCOME — the four M1 diagnostics. CaSiNo's allocation task is CLOSED.
+
+All on dev. The test partition was not re-read.
+
+### A premise correction first
+
+An arm scoring below uniform after temperature fitting would indeed be a
+plumbing bug. It is not happening: **k = 8, not 7.** `OTHER` is always offered,
+by the registered rule that an unlisted actual action is scored rather than
+discarded. So uniform is `log(1/8) = -2.0794`, not `log(1/7) = -1.946`, and the
+test arms at -2.006 to -2.068 all sit **above** uniform -- by 0.011 to 0.073.
+
+The three suspects were checked anyway, because two of them would have been
+invisible in the output:
+
+```
+1. tie labels not offered   -> FALSE. All 8 options, including all three
+                               two-way ties and the three-way, are offered on
+                               every one of 200 sampled points; no actual label
+                               is ever absent from its own option set.
+2. un-permuting is wrong    -> FALSE. Verified explicitly: under order
+                               [2,0,3,1] the prompt renders [c,a,d,b] and a
+                               ranking of A,B,C,D un-permutes to
+                               {c:0, a:1, d:2, b:3}, which is correct.
+3. theta grid too high      -> REAL, and it changes nothing. The grid ran
+                               0.05..0.95 and EXCLUDED 1.0 (uniform), so an arm
+                               whose ranking carries nothing could not be fitted
+                               flat. Extending it to 1.00 leaves every fitted
+                               theta unchanged.
+```
+
+The arms sit *just* above uniform and well below majority because majority
+exploits a skew they cannot: D2 shows it scoring **-1.6532 on single-issue
+labels**. Near-uniform arms with near-boundary thetas is not a bug. It is what an
+uninformative ranking looks like.
+
+### D1 — the oracle, on the early cut, against the M1 bar
+
+```
+dev n=40, k=8, 80 calls
+  majority (bar)               -1.8566
+  ORACLE, theta=0.75           -1.8562     lift +0.0005     top-1 0.225
+  hypothesis (M1 dev)          -1.9781
+```
+
+**+0.0005 nats.** The script printed "ORACLE BEATS MAJORITY" because the test had
+no threshold; at n=40 that gain is indistinguishable from zero, and the oracle's
+top-1 of 0.225 is *below* the majority label share of 0.2417.
+
+**Handing the model the true priority order buys nothing.** Per the registered
+branch: *the label is mostly driven by things other than the proposer's motive,
+and the task explanation stands*.
+
+### D2 — the loss is on single issues, not on ties
+
+```
+arm                single       tie
+majority          -1.6532    -2.1618
+hypothesis        -1.9929    -1.9558
+obvious           -2.0462    -1.9751
+context_neutral   -2.0970    -2.0222
+```
+
+The opposite of the shape hypothesis. Model arms are **better than majority on
+ties** and much worse on single issues. The forecast's shape is not the problem;
+the model simply cannot pick the right single issue, which is where 66.5% of the
+mass sits.
+
+### D3 — vector scaling lifts every arm, and `swap` most of all
+
+```
+arm               theta-only    +bias      gain   vs majority
+swap                 -1.9065  -1.6699   +0.2367       +0.1868   <-- highest
+hypothesis           -1.9781  -1.7274   +0.2506       +0.1292
+obvious              -2.0178  -1.7583   +0.2595       +0.0983
+context_neutral      -2.0671  -1.8194   +0.2477       +0.0372
+placebo              -2.0748  -1.8282   +0.2466       +0.0285
+```
+
+Every arm gains ~0.25 regardless of content, and the arm that gains most is
+**`swap` -- another person's portfolio, which cannot apply**. That is the
+signature of eight free bias terms re-learning the class prior on forty points,
+not of calibration revealing motive signal. The registered branch ("every arm
+needs a calibration change") does **not** fire: the ordering falsifies it.
+
+### D4 — no arm carries usable signal
+
+```
+arm                best lambda   vs majority
+context_neutral           0.00       +0.0000
+obvious                   0.00       +0.0000
+hypothesis                0.00       +0.0000
+placebo                   0.00       +0.0000
+swap                      0.30       +0.0115
+```
+
+**No mixture weight above zero improves on majority for any real arm.** The sole
+exception is `swap`, at +0.0115 -- and an arm that cannot apply to the person
+being forecast "carrying signal" is a statement about noise at n=40, not about
+motives.
+
+### Verdict
+
+Per the registered D4 branch, this is **the strongest negative available, and it
+closes the task rather than merely failing it**. CaSiNo's allocation on the early
+cut is **not a motive benchmark**: the label is balanced, the plumbing is clean,
+the calibration is not the obstacle, and even the true priority order adds
++0.0005 nats.
+
+---
+
+## DECISION — Milestone 1 moves to Avalon
+
+CaSiNo has now failed **twice, for two different structural reasons**, neither
+of them a defect in the method:
+
+1. `deal_response` was 85.1% `Accept` -- worse than the 65.6% that voided Phase
+   CP -- and was dropped at the gate before any spend.
+2. `allocation` on the early cut carries no motive signal at all, established
+   above with an oracle.
+
+It was chosen for the cleanest ground truth in the project, and that ground truth
+turns out not to drive the choice available to forecast.
+
+**Avalon becomes the M1 corpus.** The grounds were established *before* any
+Avalon forecast existed, which is what makes this a switch rather than a forking
+path:
+
+- a role is **assigned at setup and never stated**, so the hidden thing is
+  hidden by construction rather than by a cut rule;
+- the joint party-subset label passed at **majority 0.1014 against a 0.3685
+  limit** -- the best balance measured in any corpus here;
+- **7.3 choice points per leading player** across 101 leader-games, so it also
+  carries the sequential claim CaSiNo never could.
+
+**Two cautions, recorded now rather than discovered later.** The leader's
+include-rate barely varies by role (0.459-0.529), so a motive model must
+condition on *who* is being included, not on the leader's rate -- a marginal
+statistic cannot carry it. And n is far smaller: **148 proposals against CaSiNo's
+1,084 points**, so the per-corpus MDE must be computed on the joint unit before
+the run, and a result below it is exploratory.
+
+CaSiNo is retained as a **negative result**, not deleted. Its M1 test partition
+has had its one look and is closed.
