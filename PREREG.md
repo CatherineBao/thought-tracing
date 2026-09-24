@@ -1576,3 +1576,31 @@ now part of `aligned` rather than an assumption inside it.
 
 This is a resourcing decision, not a methods decision, and it is recorded here
 rather than worked around.
+
+### Addendum — the credential hypothesis is falsified
+
+The first probe ran on a 53-character `AQ.Ab8...` credential, and the outcome
+noted that a standard `AIzaSy...` API key on a billing-enabled project might
+behave differently. **It does not.** Re-run on a proper 39-character `AIzaSy`
+key:
+
+```
+new key, plain generation, gemini-2.5-flash   -> 'OK'          KEY VALID
+gemini-2.5-flash / -flash-lite                -> 400 Logprobs is not enabled
+gemini-3.5-flash / 3.6-flash                  -> 400 Logprobs is not enabled
+gemini-flash-latest / gemini-pro-latest       -> 400 Logprobs is not enabled
+legacy google.generativeai SDK, same request  -> 400 Logprobs is not enabled
+gemini-2.5-flash-001 / -preview-05-20         -> 404 not found for this API version
+```
+
+Both SDKs, every model family and tier, every naming variant. **Log-probabilities
+are absent from the Gemini Developer API as such**, not gated behind a key format
+or a project tier. One of the four standing options is therefore closed, which is
+worth the two probes it cost: a Gemini credential of any shape will not unblock
+this.
+
+The remaining options are unchanged -- **Vertex AI** (same models, where the
+capability is documented, needs GCP credentials), an **OpenAI key**
+(`top_logprobs` up to 20, exactly the required shape), the pre-registered
+**declared-ranking** fallback, or **pause** the forecaster while the converters
+proceed, since none of them depend on it.
