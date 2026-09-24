@@ -190,6 +190,26 @@ def loo_constant_accuracy(by_person) -> float:
     return (hits / total) if total else 0.0
 
 
+def person_key(point):
+    """The identity the per-person checks group on.
+
+    `person_uid` FIRST, because a speaker token is not a person. CaSiNo labels
+    its two participants `A` and `B` in every dialogue, so grouping on
+    (corpus, person) collapsed 1,030 dialogues into two people and made
+    loo_person_constant read the corpus majority instead of anything
+    per-person. It reported a plausible number while measuring nothing, which is
+    the worst way for a check to fail.
+
+    Converters that have a real per-person identity emit `person_uid`
+    (`casino-0004:A`, `3:Austria`). The (corpus, person) fallback stays for
+    corpora where the speaker token IS unique.
+    """
+    uid = point.get("person_uid")
+    if uid:
+        return uid
+    return (point.get("corpus"), point.get("person"))
+
+
 def label_stats(points) -> dict:
     """Everything the no-model half of the gate needs, for one choice type."""
     points = list(points)
@@ -197,7 +217,7 @@ def label_stats(points) -> dict:
     by_person = collections.defaultdict(list)
     for p in points:
         if p.get("actual"):
-            by_person[(p.get("corpus"), p.get("person"))].append(p["actual"])
+            by_person[person_key(p)].append(p["actual"])
     ks = [p.get("n_alternatives") or len(p.get("alternatives") or []) for p in points]
     k = (sum(ks) / len(ks)) if ks else 0.0
     return {

@@ -1813,3 +1813,75 @@ format-compliant without needing thinking control, stable within tolerance, and
 better top-1 in the sample measured. `gemini-2.5-flash-lite` is the fallback if
 3.x rate limits bite. The pin goes in `forecast_backend.json` with these numbers,
 and the checks re-run at Diplomacy's 13-option set before any Diplomacy forecast.
+
+---
+
+# OUTCOME — the CaSiNo converter, and a silent defect it exposed in the gate
+
+`casino_ingest.py`. Run through the real code paths -- `choice_points.load()`
+reads the emitted file and `run_musing.load_corpus('casino')` loads the corpus
+with no change to either.
+
+```
+dialogues 1,030 -> sets 1,030, choice points 1,084, rejects 0
+
+prose allocation precedes the submission   1,007 / 1,030 = 0.978
+silent subgroup (early cut)                  683 / 1,084 = 0.630
+prefix turns                               mean 3.69   median 3
+
+labels  Firewood 262 | Water 245 | Food 214
+        Food+Water 121 | Firewood+Water 117 | Firewood+Food 111 | all-three 14
+```
+
+Both headline figures reproduce the prototype measurements (0.981 and 0.629)
+from an independent implementation, which is the point of re-measuring them here
+rather than carrying them forward.
+
+### The label gate, through the pipeline
+
+```
+n = 1,084   people = 1,084   k = 8
+
+  [PASS] majority_share      0.2417   limit 0.3875
+  [PASS] entropy_frac        0.8532   limit 0.7500
+  [PASS] loo_person_constant 0.0000   limit 0.6000
+  OVERALL PASS        (options_only and context_neutral still pending)
+```
+
+### A check that reported a plausible number while measuring nothing
+
+The first run read **people = 2**. `label_stats` grouped on
+`(corpus, person)`, and CaSiNo calls its two participants `A` and `B` in every
+dialogue -- so 1,030 dialogues collapsed into two, and `loo_person_constant`
+returned **0.2417**, which is the corpus majority wearing a per-person label. It
+passed the gate. A check that fails by returning a credible wrong number is
+worse than one that crashes, and this one would have been quoted as evidence that
+no individual is a constant.
+
+Fixed: converters emit **`person_uid`** (`casino-0004:A`, `3:Austria`) and
+`label_gate.person_key` prefers it, falling back to `(corpus, person)` only where
+the speaker token really is unique. Re-run: **people = 1,084**, and
+`loo_person_constant` reads **0.0000** -- correct and expected, since each CaSiNo
+person has exactly one point, so leave-one-out predicts from an empty history and
+always misses. That is the honest reading, and it is why the pooled leave-one-out
+measure replaced per-person majority share in the first place.
+
+### The hindsight obligation is discharged
+
+`test_hindsight.py`, 9 tests, no LLM calls. The registered concern was that
+CaSiNo's whole case rests on the 0.630 figure, so the cut must read only the
+input:
+
+- **the cut rule is a function of the prose alone** -- rewriting
+  `task_data.issue2youget` to its opposite, and deleting it outright, both leave
+  the cut where it was;
+- the cut lands on the first prose allocation, strictly before the submission;
+- no turn at or after the cut, and no `Submit-Deal`/`Accept-Deal` token, reaches
+  a prefix;
+- a priority stated **after** the cut still leaves the person silent;
+- **`value2reason` never appears in a prefix**, and the answer key is written
+  outside `data/musing` so a prompt builder walking the corpus tree cannot reach
+  it;
+- ties are labels and `OTHER` is always offered, so nothing is discarded.
+
+17 test files pass; `splits.json` and `baseline_metrics.json` both still verify.
